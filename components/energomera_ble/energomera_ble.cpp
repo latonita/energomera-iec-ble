@@ -705,6 +705,22 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 
     case ESP_GATTC_SEARCH_CMPL_EVT: {
       
+      auto svc = this->parent_->get_service(this->service_uuid_);
+      if (svc == nullptr) {
+        ESP_LOGE(TAG, "[%s] 1 No control service found at device, not an Energomera meter..?",
+                 this->parent_->address_str().c_str());
+        break;
+      }
+      svc->parse_characteristics();
+      ESP_LOGD(TAG, "Number of characteristics found: %d", svc->characteristics.size());
+
+      for (auto &chr : svc->characteristics) {
+        ESP_LOGD(TAG, "Characteristic found: %s, handle: %d, properties: 0x%02x",
+                 chr->uuid.to_string().c_str(), chr->handle, chr->properties);
+
+  
+      }
+
       auto *chr = this->parent_->get_characteristic(this->service_uuid_, this->tx_characteristic_uuid_);
       if (chr == nullptr) {
         ESP_LOGE(TAG, "[%s] No control service found at device, not an Energomera meter..?",
