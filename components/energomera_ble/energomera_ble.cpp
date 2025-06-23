@@ -118,6 +118,23 @@ uint8_t baud_rate_to_byte(uint32_t baud) {
 void EnergomeraBleComponent::setup() {
   ESP_LOGD(TAG, "setup");
 
+  // Set BLE security parameters
+  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_IO;
+  uint8_t key_size = 16;
+  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+
+  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &resp_key, sizeof(resp_key));
+
+  ESP_LOGI(TAG, "BLE security params set");
+
+  // register_gap_event_handler
+
   this->set_timeout(BOOT_WAIT_S * 15000, [this]() {
     ESP_LOGD(TAG, "Boot timeout, component is ready to use");
     this->clear_rx_buffers_();
@@ -668,19 +685,68 @@ void EnergomeraBleComponent::queue_single_read(const std::string &request) {
   this->single_requests_.push_back(request);
 }
 
+void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  ESP_LOGD(TAG, ">>>>>>>>>> GAP gap_event_handler: %d", event);
+
+  switch (event) {
+    case ESP_GAP_BLE_AUTH_CMPL_EVT: {
+      ESP_LOGI(TAG, "[%s] Authentication/bonding completed", this->parent_->address_str().c_str());
+      // Handle authentication completion here if needed
+
+      esp_ble_auth_cmpl_t *auth_cmpl = &param->ble_security.auth_cmpl;
+      if (auth_cmpl->success) {
+        ESP_LOGI(TAG, "[%s] Authentication successful", this->parent_->address_str().c_str());
+      } else {
+        ESP_LOGE(TAG, "[%s] Authentication failed, reason %d", this->parent_->address_str().c_str(),
+                 auth_cmpl->fail_reason);
+      }
+
+    } break;
+
+    case ESP_GAP_BLE_KEY_EVT: {
+      ESP_LOGI(TAG, "[%s] Key event", this->parent_->address_str().c_str());
+      // Handle key events here if needed
+      break;
+    }
+
+    case ESP_GAP_BLE_SEC_REQ_EVT: {
+      ESP_LOGI(TAG, "[%s] Security request", this->parent_->address_str().c_str());
+      // Handle security request here if needed
+      // For example, you can reply with the appropriate security parameters
+      esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+    } break;
+
+    case ESP_GAP_BLE_PASSKEY_NOTIF_EVT: {
+      ESP_LOGI(TAG, "[%s] Passkey notification: %06d", this->parent_->address_str().c_str());
+    } break;
+
+    case ESP_GAP_BLE_PASSKEY_REQ_EVT: {
+      ESP_LOGI(TAG, "[%s] Passkey request", this->parent_->address_str().c_str());
+      esp_bd_addr_t remote_bda;
+      // memcpy(remote_bda, parent_->get_remote_bda(), sizeof(esp_bd_addr_t));
+      // esp_ble_passkey_reply(remote_bda, true, this->passkey_);
+      esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, this->passkey_);
+
+    } break;
+
+    case ESP_GAP_BLE_NC_REQ_EVT: {
+      ESP_LOGI(TAG, "[%s] Numeric comparison request", this->parent_->address_str().c_str());
+      esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
+    } break;
+  }
+}
+
 void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                                                  esp_ble_gattc_cb_param_t *param) {
+  static uint16_t our_conn_id = 0;
   switch (event) {
     case ESP_GATTC_CONNECT_EVT: {
-      this->node_state = espbt::ClientState::ESTABLISHED;
+      this->node_state = espbt::ClientState::CONNECTING;
       this->status_notification_received_ = false;
 
-      ESP_LOGI(TAG, "[%s] Connected", this->parent_->address_str().c_str());
+      our_conn_id = param->connect.conn_id;
+      ESP_LOGI(TAG, "[%s] Connected, conn id = %d", this->parent_->address_str().c_str(), our_conn_id);
 
-      auto ret = esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT);
-      if (ret) {
-        ESP_LOGW(TAG, "esp_ble_set_encryption failed, status=%x", ret);
-      }
       // Start searching for the service
       // auto status = esp_ble_gattc_search_service(this->parent()->get_gattc_if(), this->parent()->get_remote_bda(),
       //                                            &this->service_uuid_);
@@ -692,7 +758,19 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 
     case ESP_GATTC_OPEN_EVT: {
       if (param->open.status == ESP_GATT_OK) {
-        ESP_LOGI(TAG, "Connected successfully!");
+        ESP_LOGI(TAG, "Connected successfully! Setting up security...");
+
+        auto ret = esp_ble_set_encryption(this->parent()->get_remote_bda(),
+                                          ESP_BLE_SEC_ENCRYPT_MITM);  // ESP_BLE_SEC_ENCRYPT);
+        if (ret) {
+          ESP_LOGW(TAG, "esp_ble_set_encryption failed, status=%x", ret);
+        }
+        // esp_ble_gatt_set_local_mtu(256);
+        // esp_err_t mtu_ret = esp_ble_gattc_send_mtu_req(gattc_if, our_conn_id);
+        // if (mtu_ret) {
+        //   ESP_LOGE(TAG, "config MTU error, error code = %x", mtu_ret);
+        // }
+
       } else {
         ESP_LOGE(TAG, "Failed to connect, status=%d", param->open.status);
         this->node_state = espbt::ClientState::IDLE;
@@ -706,38 +784,86 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       break;
     }
 
+    case ESP_GATTC_CFG_MTU_EVT: {
+      ESP_LOGI(TAG, "MTU exchange, status %d, MTU %d. Setting up encryption", param->cfg_mtu.status,
+               param->cfg_mtu.mtu);
+
+    } break;
+
+    case ESP_GATTC_ENC_CMPL_CB_EVT: {
+      // Encryption (bonding) has completed
+      // Now you can proceed with service discovery or other operations
+      auto ret = esp_ble_gattc_search_service(gattc_if, our_conn_id, nullptr);
+      if (ret) {
+        ESP_LOGE(TAG, "esp_ble_gattc_search_service failed, status=%d", ret);
+      } else {
+        ESP_LOGI(TAG, "[%s] Encryption complete, searching for services", this->parent_->address_str().c_str());
+      }
+    } break;
+
     case ESP_GATTC_SEARCH_CMPL_EVT: {
-      auto svc = this->parent_->get_service(this->service_uuid_);
-      if (svc == nullptr) {
-        ESP_LOGE(TAG, "[%s] 1 No control service found at device, not an Energomera meter..?",
-                 this->parent_->address_str().c_str());
-        break;
+      ESP_LOGI(TAG, "[%s] Service discovery complete", this->parent_->address_str().c_str());
+      this->node_state = espbt::ClientState::ESTABLISHED;
+      auto r = this->parent()->get_characteristic(this->service_uuid_, this->tx_characteristic_uuid_);
+      if (r == nullptr) {
+        ESP_LOGE(TAG, "Cant get characteristic %s from service %s", this->tx_characteristic_uuid_.to_string().c_str(),
+                 this->service_uuid_.to_string().c_str());
+      } else {
+        ESP_LOGI(TAG, "[%s] Found characteristic %s", this->parent_->address_str().c_str(),
+                 this->tx_characteristic_uuid_.to_string().c_str());
       }
-      svc->parse_characteristics();
-      ESP_LOGD(TAG, "Number of characteristics found: %d", svc->characteristics.size());
+      // // all the services have been discovered, i believe
+      // auto svc = this->parent_->get_service(this->service_uuid_);
+      // if (svc == nullptr) {
+      //   ESP_LOGE(TAG, "[%s] 1 No control service found at device, not an Energomera meter..?",
+      //            this->parent_->address_str().c_str());
+      //   break;
+      // }
+      // svc->parse_characteristics();
+      // ESP_LOGD(TAG, "Number of characteristics found: %d", svc->characteristics.size());
 
-      for (auto &chr : svc->characteristics) {
-        ESP_LOGD(TAG, "Characteristic found: %s, handle: %d, properties: 0x%02x", chr->uuid.to_string().c_str(),
-                 chr->handle, chr->properties);
-      }
+      // for (auto &chr : svc->characteristics) {
+      //   ESP_LOGD(TAG, "Characteristic found: %s, handle: %d, properties: 0x%02x", chr->uuid.to_string().c_str(),
+      //            chr->handle, chr->properties);
+      // }
 
-      auto *chr = this->parent_->get_characteristic(this->service_uuid_, this->tx_characteristic_uuid_);
-      if (chr == nullptr) {
-        ESP_LOGE(TAG, "[%s] No control service found at device, not an Energomera meter..?",
-                 this->parent_->address_str().c_str());
-        break;
-      }
-      this->tx_char_handle_ = chr->handle;
+      // static bool removed_once = false;
+      // if (svc->characteristics.empty() && !removed_once) {
+      //   // redo bonding
+      //   auto er = esp_ble_remove_bond_device(this->parent_->get_remote_bda());
+      //   removed_once = true;
+      //   if (er) {
+      //     ESP_LOGE(TAG, "esp_ble_remove_bond_device failed, status=%d", er);
+      //   }
+      //   break;
+      // }
 
-      this->rx_notify_handle_ = chr->handle;
+      // auto *chr = this->parent_->get_characteristic(this->service_uuid_, this->tx_characteristic_uuid_);
+      // if (chr == nullptr) {
+      //   ESP_LOGE(TAG, "[%s] 0 No control service found at device, not an Energomera meter..?",
+      //            this->parent_->address_str().c_str());
+      //   break;
+      // }
+      // this->tx_char_handle_ = chr->handle;
 
-      auto status = esp_ble_gattc_register_for_notify(this->parent()->get_gattc_if(), this->parent()->get_remote_bda(),
-                                                      this->rx_notify_handle_);
-      if (status) {
-        ESP_LOGW(TAG, "esp_ble_gattc_register_for_notify failed, status=%d", status);
-      }
+      // chr = this->parent_->get_characteristic(
+      //     this->service_uuid_, esp32_ble_tracker::ESPBTUUID::from_raw("b91b0101-8bef-45e2-97c3-1cd862d914df"));
+      // if (chr == nullptr) {
+      //   ESP_LOGE(TAG, "[%s] 0000 No control service found at device, not an Energomera meter..?",
+      //            this->parent_->address_str().c_str());
+      //   break;
+      // }
+      // this->rx_notify_handle_ = chr->handle;
+
+      // auto status = esp_ble_gattc_register_for_notify(this->parent()->get_gattc_if(),
+      // this->parent()->get_remote_bda(),
+      //                                                 this->rx_notify_handle_);
+      // if (status) {
+      //   ESP_LOGW(TAG, "esp_ble_gattc_register_for_notify failed, status=%d", status);
+      // }
       break;
     }
+
     case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
       this->node_state = espbt::ClientState::ESTABLISHED;
       this->status_notification_received_ = false;
@@ -770,9 +896,15 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
           ESP_LOGW(TAG, "esp_ble_gattc_unregister_for_notify failed, status=%d", status);
         }
       }
+      auto er = esp_ble_remove_bond_device(this->parent_->get_remote_bda());
       this->rx_notify_handle_ = 0;
       this->tx_char_handle_ = 0;
       this->buffers_.amount_in = 0;
+      break;
+    }
+
+    case ESP_GATTC_CLOSE_EVT: {
+      ESP_LOGI(TAG, "[%s] GATT client close event", this->parent_->address_str().c_str());
       break;
     }
     default:

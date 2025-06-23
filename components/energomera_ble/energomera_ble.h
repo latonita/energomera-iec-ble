@@ -60,8 +60,12 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
 
   void queue_single_read(const std::string &req);
 
-  void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
+  virtual void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override;
+  virtual void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
+  
+
+
 
 #ifdef USE_TIME
   void set_time_source(time::RealTimeClock *rtc) { this->time_source_ = rtc; };
@@ -69,7 +73,10 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
 #endif
   void set_device_time(uint32_t timestamp);  // set time from given timestamp
 
+  void set_passkey(uint32_t passkey) { this->passkey_ = passkey; };
+
  protected:
+  uint32_t passkey_{0};
   std::string meter_address_{""};
   uint32_t receive_timeout_ms_{500};
   uint32_t delay_between_requests_ms_{50};

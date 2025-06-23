@@ -6,11 +6,12 @@ from esphome.components import ble_client, binary_sensor, time
 from esphome.const import (
     CONF_ID,
     CONF_ADDRESS,
-    CONF_BAUD_RATE,
+
     CONF_RECEIVE_TIMEOUT,
     CONF_UPDATE_INTERVAL,
-    CONF_FLOW_CONTROL_PIN,
+
     CONF_TIME_ID,
+    CONF_PIN,
 )
 
 CODEOWNERS = ["@latonita"]
@@ -90,6 +91,7 @@ CONFIG_SCHEMA = cv.All(
                 min=0, max=100
             ),
             cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
+            cv.Required(CONF_PIN): cv.int_range(min=0,max=999999),
         }
     )
 #    .extend(cv.COMPONENT_SCHEMA)
@@ -120,3 +122,5 @@ async def to_code(config):
     cg.add(var.set_delay_between_requests_ms(config[CONF_DELAY_BETWEEN_REQUESTS]))
     cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
     cg.add(var.set_reboot_after_failure(config[CONF_REBOOT_AFTER_FAILURE]))
+
+    cg.add(var.set_passkey(config[CONF_PIN]))
