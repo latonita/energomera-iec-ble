@@ -34,16 +34,18 @@ using SingleRequests = std::list<std::string>;
 using FrameStopFunction = std::function<bool(uint8_t *buf, size_t size)>;
 using ReadFunction = std::function<size_t()>;
 
-static const char *SERVICE_UUID = "b91b0100-8bef-45e2-97c3-1cd862d914df";
-static const char *TX_CHAR_UUID = "b91b0105-8bef-45e2-97c3-1cd862d914df";
-static const char *RX_CHAR_UUID = "b91b0106-8bef-45e2-97c3-1cd862d914df";
+// static const char *SERVICE_UUID = "b91b0100-8bef-45e2-97c3-1cd862d914df";
+// static const char *TX_CHAR_UUID = "b91b0105-8bef-45e2-97c3-1cd862d914df";
+// static const char *RX_CHAR_UUID = "b91b0106-8bef-45e2-97c3-1cd862d914df";
+namespace espbt = esphome::esp32_ble_tracker;
+
+static const espbt::ESPBTUUID SERVICE_UUID = espbt::ESPBTUUID::from_raw("b91b0100-8bef-45e2-97c3-1cd862d914df");
+static const espbt::ESPBTUUID CHAR_TX_UUID = espbt::ESPBTUUID::from_raw("b91b0105-8bef-45e2-97c3-1cd862d914df");
+static const espbt::ESPBTUUID CHAR_RX_UUID = espbt::ESPBTUUID::from_raw("b91b0106-8bef-45e2-97c3-1cd862d914df");
 
 class EnergomeraBleComponent : public PollingComponent, public ble_client::BLEClientNode {
  public:
-  EnergomeraBleComponent()
-      : tag_(generateTag()),
-        service_uuid_(esp32_ble_tracker::ESPBTUUID::from_raw(SERVICE_UUID)),
-        tx_characteristic_uuid_(esp32_ble_tracker::ESPBTUUID::from_raw(TX_CHAR_UUID)){};
+  EnergomeraBleComponent() : tag_(generateTag()){};
 
   void setup() override;
   void dump_config() override;
@@ -61,11 +63,10 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void queue_single_read(const std::string &req);
 
   virtual void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
-                           esp_ble_gattc_cb_param_t *param) override;
+                                   esp_ble_gattc_cb_param_t *param) override;
   virtual void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
-  
 
-
+  bool discover_characteristics_();
 
 #ifdef USE_TIME
   void set_time_source(time::RealTimeClock *rtc) { this->time_source_ = rtc; };
@@ -82,10 +83,10 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   uint32_t delay_between_requests_ms_{50};
 
   // BLE
-  bool status_notification_received_ = false;
-  uint8_t no_response_count_{0};
-  uint16_t tx_char_handle_;
-  uint16_t rx_notify_handle_;
+  bool ble_status_notification_received_ = false;
+  uint8_t ble_no_response_count_{0};
+  uint16_t char_tx_handle_;
+  uint16_t char_rx_notify_handle_;
 
 #ifdef USE_TIME
   time::RealTimeClock *time_source_{nullptr};
@@ -226,10 +227,6 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
 
   esp_err_t write_array(uint8_t *data, size_t length);
   void receive_data(uint8_t *data, size_t length);
-
-  esp32_ble_tracker::ESPBTUUID service_uuid_;
-  esp32_ble_tracker::ESPBTUUID tx_characteristic_uuid_;
-  esp32_ble_tracker::ESPBTUUID rx_characteristic_uuid_;
 };
 
 }  // namespace energomera_ble
