@@ -881,7 +881,15 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         ESP_LOGD("[%s] Cant discover characteristics, will not be able to read data from device",
                  this->parent_->address_str().c_str());
       }
+      this->node_state = espbt::ClientState::ESTABLISHED;
+      this->char_tx_handle_ = 0x20;
+      this->char_rx_notify_handle_ = 0x20;
 
+      auto status = esp_ble_gattc_register_for_notify(this->parent()->get_gattc_if(), this->parent()->get_remote_bda(),
+                                                      this->char_rx_notify_handle_);
+      if (status) {
+        ESP_LOGW(TAG, "esp_ble_gattc_register_for_notify failed, status=%d", status);
+      }
       // auto r = this->parent()->get_characteristic(this->service_uuid_, this->tx_characteristic_uuid_);
       // if (r == nullptr) {
       //   ESP_LOGE(TAG, "Cant get characteristic %s from service %s",

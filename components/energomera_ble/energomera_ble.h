@@ -34,6 +34,43 @@ using SingleRequests = std::list<std::string>;
 using FrameStopFunction = std::function<bool(uint8_t *buf, size_t size)>;
 using ReadFunction = std::function<size_t()>;
 
+/*
+
+handle = 0x0002, char properties = 0x02, char value handle = 0x0003, uuid = 00002a00-0000-1000-8000-00805f9b34fb
+handle = 0x0004, char properties = 0x02, char value handle = 0x0005, uuid = 00002a01-0000-1000-8000-00805f9b34fb
+handle = 0x0006, char properties = 0x02, char value handle = 0x0007, uuid = 00002a04-0000-1000-8000-00805f9b34fb
+handle = 0x000a, char properties = 0x02, char value handle = 0x000b, uuid = 00002a23-0000-1000-8000-00805f9b34fb
+handle = 0x000c, char properties = 0x02, char value handle = 0x000d, uuid = 00002a24-0000-1000-8000-00805f9b34fb
+handle = 0x000e, char properties = 0x02, char value handle = 0x000f, uuid = 00002a25-0000-1000-8000-00805f9b34fb
+handle = 0x0010, char properties = 0x02, char value handle = 0x0011, uuid = 00002a26-0000-1000-8000-00805f9b34fb
+handle = 0x0012, char properties = 0x02, char value handle = 0x0013, uuid = 00002a27-0000-1000-8000-00805f9b34fb
+handle = 0x0014, char properties = 0x02, char value handle = 0x0015, uuid = 00002a28-0000-1000-8000-00805f9b34fb
+handle = 0x0016, char properties = 0x02, char value handle = 0x0017, uuid = 00002a29-0000-1000-8000-00805f9b34fb
+handle = 0x0018, char properties = 0x02, char value handle = 0x0019, uuid = 00002a2a-0000-1000-8000-00805f9b34fb
+handle = 0x001a, char properties = 0x02, char value handle = 0x001b, uuid = 00002a50-0000-1000-8000-00805f9b34fb
+handle = 0x001d, char properties = 0x02, char value handle = 0x001e, uuid = b91b0101-8bef-45e2-97c3-1cd862d914df
+handle = 0x0020, char properties = 0x5a, char value handle = 0x0021, uuid = b91b0105-8bef-45e2-97c3-1cd862d914df
+handle = 0x0024, char properties = 0x02, char value handle = 0x0025, uuid = b91b0106-8bef-45e2-97c3-1cd862d914df
+handle = 0x0027, char properties = 0x02, char value handle = 0x0028, uuid = b91b0107-8bef-45e2-97c3-1cd862d914df
+handle = 0x002a, char properties = 0x02, char value handle = 0x002b, uuid = b91b0108-8bef-45e2-97c3-1cd862d914df
+handle = 0x002d, char properties = 0x02, char value handle = 0x002e, uuid = b91b0109-8bef-45e2-97c3-1cd862d914df
+handle = 0x0030, char properties = 0x02, char value handle = 0x0031, uuid = b91b010a-8bef-45e2-97c3-1cd862d914df
+handle = 0x0033, char properties = 0x02, char value handle = 0x0034, uuid = b91b010b-8bef-45e2-97c3-1cd862d914df
+handle = 0x0036, char properties = 0x02, char value handle = 0x0037, uuid = b91b010c-8bef-45e2-97c3-1cd862d914df
+handle = 0x0039, char properties = 0x02, char value handle = 0x003a, uuid = b91b010d-8bef-45e2-97c3-1cd862d914df
+handle = 0x003c, char properties = 0x02, char value handle = 0x003d, uuid = b91b010e-8bef-45e2-97c3-1cd862d914df
+handle = 0x003f, char properties = 0x02, char value handle = 0x0040, uuid = b91b010f-8bef-45e2-97c3-1cd862d914df
+handle = 0x0042, char properties = 0x02, char value handle = 0x0043, uuid = b91b0110-8bef-45e2-97c3-1cd862d914df
+handle = 0x0045, char properties = 0x02, char value handle = 0x0046, uuid = b91b0111-8bef-45e2-97c3-1cd862d914df
+handle = 0x0048, char properties = 0x02, char value handle = 0x0049, uuid = b91b0112-8bef-45e2-97c3-1cd862d914df
+handle = 0x004b, char properties = 0x02, char value handle = 0x004c, uuid = b91b0113-8bef-45e2-97c3-1cd862d914df
+handle = 0x004e, char properties = 0x02, char value handle = 0x004f, uuid = b91b0114-8bef-45e2-97c3-1cd862d914df
+
+*/
+
+
+
+
 // static const char *SERVICE_UUID = "b91b0100-8bef-45e2-97c3-1cd862d914df";
 // static const char *TX_CHAR_UUID = "b91b0105-8bef-45e2-97c3-1cd862d914df";
 // static const char *RX_CHAR_UUID = "b91b0106-8bef-45e2-97c3-1cd862d914df";
