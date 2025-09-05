@@ -106,17 +106,12 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   esp_bt_uuid_t tx_char_uuid_;
   esp_bt_uuid_t rx_char_uuid_;
 
-  uint16_t tx_handle_;
-  uint16_t rx_handle_;
   uint8_t command_counter_;
-  bool authenticated_{false};
 
   //////////////////////
   uint16_t service_start_handle_{0};
   uint16_t service_end_handle_{0};
 
-
-  uint16_t rx0_handle_;
     // BLE
   bool ble_status_notification_received_ = false;
   uint8_t ble_no_response_count_{0};
@@ -131,11 +126,22 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   bool rx0_found_{false};
   bool ready_to_communicate_{false};
   bool waiting_for_response_{false};
+  bool waiting_for_auth_response_{false};
+  bool authenticated_{false};
+
   void start_authentication();
+  void send_auth_command();
+  void send_time_sync();
   void send_command(uint8_t cmd, uint8_t *data, size_t data_len);
   void handle_response(uint8_t *data, size_t len);
   uint8_t last_command_;
   uint32_t response_timeout_{0};
+
+  // Characteristic handles for CE208 communication
+  uint16_t tx_handle_{0x0021};   // TX characteristic handle
+  uint16_t rx0_handle_{0x001e};  // RX0 characteristic handle
+  uint16_t auth_handle_{0x001e}; // Auth characteristic handle (same as RX0)
+  uint16_t time_handle_{0x0031}; // Time characteristic handle (RX4)
 
   void setup_characteristics();
 

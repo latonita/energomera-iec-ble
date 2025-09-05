@@ -727,14 +727,17 @@ void EnergomeraBleComponent::setup_characteristics() {
   // TX  (b91b0105): char handle = 0x0020, value handle = 0x0021, props = 0x5a (WRITE_NO_RSP | NOTIFY | INDICATE | WRITE)
   // RX1 (b91b0106): char handle = 0x0024, value handle = 0x0025, props = 0x02 (READ)
   
-  this->tx_handle_ = 0x0021;        // TX value handle for writing
-  this->rx0_handle_ = 0x001e;       // RX0 value handle for reading
+  this->tx_handle_ = 0x0021;        // TX value handle for writing commands
+  this->rx0_handle_ = 0x001e;       // RX0 value handle for notifications
+  this->auth_handle_ = 0x001e;      // Auth handle (same as RX0, sendDataHandle=2)
+  this->time_handle_ = 0x0031;      // Time handle (RX4, sendDataHandle=3)
   this->tx_found_ = true;
   this->rx0_found_ = true;
   
-  ESP_LOGI(TAG, "✓ TX characteristic found at handle 0x%04x", this->tx_handle_);
-  ESP_LOGI(TAG, "✓ RX0 characteristic found at handle 0x%04x", this->rx0_handle_);
-  ESP_LOGI(TAG, "All characteristics configured successfully!");
+  ESP_LOGI(TAG, "✓ TX characteristic at handle 0x%04x", this->tx_handle_);
+  ESP_LOGI(TAG, "✓ RX0/Auth characteristic at handle 0x%04x", this->auth_handle_);
+  ESP_LOGI(TAG, "✓ RX4/Time characteristic at handle 0x%04x", this->time_handle_);
+  ESP_LOGI(TAG, "All CE208 characteristics configured successfully!");
 
   // Enable notifications on RX0 characteristic if found
   if (this->rx0_found_) {
@@ -1025,19 +1028,27 @@ void EnergomeraBleComponent::start_authentication() {
   if (!this->ready_to_communicate_)
     return;
 
-  ESP_LOGI(TAG, "Starting authentication");
+  ESP_LOGI(TAG, "Starting CE208 authentication sequence");
 
-  // Send authentication command (based on original code analysis)
-  // This might be different for your specific meter model
-  uint8_t auth_cmd = 0xFF;       // Authentication command
-  uint8_t auth_data[] = {0x00};  // Authentication data
-
-  this->send_command(auth_cmd, auth_data, sizeof(auth_data));
+  // Send authentication command - single 0xFF byte to auth handle
+  this->send_auth_command();
 }
 
 void EnergomeraBleComponent::handle_response(uint8_t *data, size_t len) {
   ESP_LOGD(TAG, "Received response: length=%d", len);
+  ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, esp_log_level_t::ESP_LOG_DEBUG);
 
+  // Check for CE208 authorization response (20-byte response confirms authentication)
+  if (!this->authenticated_ && this->waiting_for_auth_response_ && len == 20) {
+    ESP_LOGI(TAG, "CE208 authentication successful - received 20-byte authorization response");
+    this->authenticated_ = true;
+    this->waiting_for_auth_response_ = false;
+    this->cancel_timeout("auth_check");
+    ESP_LOGI(TAG, "Ready for data communication");
+    return;
+  }
+
+  // Handle other responses
   if (len < 3)
     return;  // Invalid response
 
@@ -1126,6 +1137,83 @@ void EnergomeraBleComponent::send_command(uint8_t cmd, uint8_t *data, size_t dat
     this->response_timeout_ = millis() + 2000;
   } else {
     ESP_LOGW(TAG, "Failed to send command, status=%d", status);
+  }
+}
+
+void EnergomeraBleComponent::send_auth_command() {
+  ESP_LOGD(TAG, "Sending authentication command (0xFF)");
+  
+  // Send single 0xFF byte to auth characteristic (char2_handle)
+  uint8_t auth_data[] = {0xFF};
+  
+  esp_err_t status = esp_ble_gattc_write_char(
+    this->parent()->get_gattc_if(), 
+    this->parent()->get_conn_id(), 
+    this->auth_handle_,  // Use auth handle (char2_handle equivalent)
+    sizeof(auth_data), 
+    auth_data, 
+    ESP_GATT_WRITE_TYPE_RSP,  // Write with response as per reference
+    ESP_GATT_AUTH_REQ_NONE
+  );
+
+  if (status == ESP_OK) {
+    ESP_LOGD(TAG, "Auth command sent successfully to handle 0x%04x", this->auth_handle_);
+    this->waiting_for_auth_response_ = true;
+    // Schedule time sync command
+    this->set_timeout("time_sync", 500, [this]() { this->send_time_sync(); });
+  } else {
+    ESP_LOGW(TAG, "Failed to send auth command, status=%d", status);
+  }
+}
+
+void EnergomeraBleComponent::send_time_sync() {
+  ESP_LOGD(TAG, "Sending time synchronization");
+
+  // Prepare 8-byte time data as per reference implementation
+  time_t now = ::time(nullptr);
+  if (now < 1000000) {
+    ESP_LOGW(TAG, "System time not set, using default");
+    now = 1640995200; // 2022-01-01 00:00:00
+  }
+  
+  struct tm timeinfo;
+  localtime_r(&now, &timeinfo);
+  
+  uint8_t time_data[8];
+  time_data[0] = (timeinfo.tm_year + 1900) / 100;  // Century (20 for 2024)
+  time_data[1] = (timeinfo.tm_year + 1900) % 100;  // Year (24 for 2024)
+  time_data[2] = timeinfo.tm_mon + 1;              // Month (1-12)
+  time_data[3] = timeinfo.tm_mday;                 // Day (1-31)
+  time_data[4] = timeinfo.tm_hour;                 // Hour (0-23)
+  time_data[5] = timeinfo.tm_min;                  // Minute (0-59)
+  time_data[6] = timeinfo.tm_sec;                  // Second (0-59)
+  time_data[7] = timeinfo.tm_wday;                 // Day of week (0=Sunday)
+  
+  ESP_LOGD(TAG, "Time sync data: %02d%02d-%02d-%02d %02d:%02d:%02d wday=%d", 
+           time_data[0], time_data[1], time_data[2], time_data[3], 
+           time_data[4], time_data[5], time_data[6], time_data[7]);
+  
+  esp_err_t status = esp_ble_gattc_write_char(
+    this->parent()->get_gattc_if(), 
+    this->parent()->get_conn_id(), 
+    this->time_handle_,  // Use time handle (char5_handle equivalent)
+    sizeof(time_data), 
+    time_data, 
+    ESP_GATT_WRITE_TYPE_RSP,  // Write with response
+    ESP_GATT_AUTH_REQ_NONE
+  );
+
+  if (status == ESP_OK) {
+    ESP_LOGD(TAG, "Time sync sent successfully to handle 0x%04x", this->time_handle_);
+    // Set timeout to wait for 20-byte authorization response
+    this->set_timeout("auth_check", 2000, [this]() {
+      if (!this->authenticated_) {
+        ESP_LOGW(TAG, "Authentication timeout - no 20-byte response received");
+        this->mark_failed();
+      }
+    });
+  } else {
+    ESP_LOGW(TAG, "Failed to send time sync, status=%d", status);
   }
 }
 
