@@ -687,8 +687,8 @@ void EnergomeraBleComponent::update() {
     return;
   }
 
-  ESP_LOGD(TAG, "Starting data collection");
-  this->set_next_state_(State::TRY_LOCK_BUS);
+  ESP_LOGD(TAG, "Starting data collection. but its not implemented yet");
+  //this->set_next_state_(State::TRY_LOCK_BUS);
 }
 
 void EnergomeraBleComponent::queue_single_read(const std::string &request) {
@@ -746,40 +746,53 @@ void EnergomeraBleComponent::setup_characteristics() {
   this->service_end_handle_ = service_result[0].end_handle;
   ESP_LOGI(TAG, "Found service: start=0x%04x, end=0x%04x", this->service_start_handle_, this->service_end_handle_);
   
-  // Now get all characteristics in this service
-  esp_gattc_char_elem_t result[10];
-  uint16_t count = 10;
-  uint16_t offset = 0;
-  esp_gatt_status_t status = esp_ble_gattc_get_all_char(
-    this->parent()->get_gattc_if(), 
+  // Try to find characteristics by UUID instead of getting all at once
+  esp_bt_uuid_t tx_uuid, rx0_uuid;
+  tx_uuid.len = ESP_UUID_LEN_128;
+  memcpy(tx_uuid.uuid.uuid128, CEREMOTE_TX_UUID, 16);
+  rx0_uuid.len = ESP_UUID_LEN_128;
+  memcpy(rx0_uuid.uuid.uuid128, CEREMOTE_RX0_UUID, 16);
+  
+  // Find TX characteristic
+  esp_gattc_char_elem_t tx_result;
+  uint16_t tx_count = 1;
+  esp_gatt_status_t tx_status = esp_ble_gattc_get_char_by_uuid(
+    this->parent()->get_gattc_if(),
+    this->parent()->get_conn_id(), 
+    this->service_start_handle_,
+    this->service_end_handle_,
+    tx_uuid,
+    &tx_result,
+    &tx_count
+  );
+  
+  if (tx_status == ESP_GATT_OK && tx_count > 0) {
+    this->tx_handle_ = tx_result.char_handle;
+    this->tx_found_ = true;
+    ESP_LOGI(TAG, "TX characteristic found at handle 0x%04x", this->tx_handle_);
+  } else {
+    ESP_LOGW(TAG, "TX characteristic not found, status=%d, count=%d", tx_status, tx_count);
+  }
+  
+  // Find RX0 characteristic  
+  esp_gattc_char_elem_t rx0_result;
+  uint16_t rx0_count = 1;
+  esp_gatt_status_t rx0_status = esp_ble_gattc_get_char_by_uuid(
+    this->parent()->get_gattc_if(),
     this->parent()->get_conn_id(),
     this->service_start_handle_, 
     this->service_end_handle_,
-    result, 
-    &count,
-    offset
+    rx0_uuid,
+    &rx0_result,
+    &rx0_count
   );
   
-  if (status == ESP_GATT_OK) {
-    ESP_LOGD(TAG, "Found %d characteristics", count);
-    for (int i = 0; i < count; i++) {
-      ESP_LOGD(TAG, "Char %d: handle=0x%04x, props=0x%02x", i, result[i].char_handle, result[i].properties);
-      
-      // Check if this is the TX characteristic (b91b0105)
-      if (memcmp(result[i].uuid.uuid.uuid128, CEREMOTE_TX_UUID, 16) == 0) {
-        this->tx_handle_ = result[i].char_handle;
-        this->tx_found_ = true;
-        ESP_LOGI(TAG, "TX characteristic found at handle 0x%04x", this->tx_handle_);
-      }
-      // Check if this is RX0 characteristic (b91b0101)  
-      else if (memcmp(result[i].uuid.uuid.uuid128, CEREMOTE_RX0_UUID, 16) == 0) {
-        this->rx0_handle_ = result[i].char_handle;
-        this->rx0_found_ = true;
-        ESP_LOGI(TAG, "RX0 characteristic found at handle 0x%04x", this->rx0_handle_);
-      }
-    }
+  if (rx0_status == ESP_GATT_OK && rx0_count > 0) {
+    this->rx0_handle_ = rx0_result.char_handle;
+    this->rx0_found_ = true;
+    ESP_LOGI(TAG, "RX0 characteristic found at handle 0x%04x", this->rx0_handle_);
   } else {
-    ESP_LOGE(TAG, "Failed to get characteristics, status=%d", status);
+    ESP_LOGW(TAG, "RX0 characteristic not found, status=%d, count=%d", rx0_status, rx0_count);
   }
 
   // Enable notifications on RX0 characteristic if found
