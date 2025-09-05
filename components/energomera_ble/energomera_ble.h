@@ -87,7 +87,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void dump_config() override;
   void loop() override;
   void update() override;
-  float get_setup_priority() const override { return setup_priority::DATA; };
+  float get_setup_priority() const override { return setup_priority::LATE; };
 
   void set_meter_address(const std::string &addr) { this->meter_address_ = addr; };
   void set_receive_timeout_ms(uint32_t timeout) { this->receive_timeout_ms_ = timeout; };

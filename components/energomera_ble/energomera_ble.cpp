@@ -1181,15 +1181,34 @@ void EnergomeraBleComponent::send_auth_command() {
 void EnergomeraBleComponent::send_time_sync() {
   ESP_LOGD(TAG, "Sending time synchronization");
 
-  // Prepare 8-byte time data as per reference implementation
-  time_t now = ::time(nullptr);
-  if (now < 1000000) {
-    ESP_LOGW(TAG, "System time not set, using default");
-    now = 1640995200; // 2022-01-01 00:00:00
+  struct tm timeinfo;
+  
+  // Check if time source is available and time is valid
+  if (!this->time_source_) {
+    ESP_LOGW(TAG, "No time source configured, using default time");
+    time_t now = 1640995200; // 2022-01-01 00:00:00 as fallback
+    localtime_r(&now, &timeinfo);
+  } else {
+    auto time = this->time_source_->now();
+    if (!time.is_valid()) {
+      ESP_LOGW(TAG, "Time source not synchronized yet, using default time");
+      time_t now = 1640995200; // 2022-01-01 00:00:00 as fallback
+      localtime_r(&now, &timeinfo);
+    } else {
+      // Use valid time from ESPHome time source
+      ESP_LOGD(TAG, "Using synchronized time: %04d-%02d-%02d %02d:%02d:%02d", 
+               time.year, time.month, time.day_of_month, time.hour, time.minute, time.second);
+      timeinfo.tm_year = time.year - 1900;
+      timeinfo.tm_mon = time.month - 1;
+      timeinfo.tm_mday = time.day_of_month;
+      timeinfo.tm_hour = time.hour;
+      timeinfo.tm_min = time.minute;
+      timeinfo.tm_sec = time.second;
+      timeinfo.tm_wday = time.day_of_week - 1; // ESPHome uses 1=Sunday, tm uses 0=Sunday
+    }
   }
   
-  struct tm timeinfo;
-  localtime_r(&now, &timeinfo);
+  // Prepare 8-byte time data as per reference implementation
   
   uint8_t time_data[8];
   time_data[0] = (timeinfo.tm_year + 1900) / 100;  // Century (20 for 2024)
