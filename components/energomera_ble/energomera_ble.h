@@ -168,6 +168,11 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void set_passkey(uint32_t passkey) { this->passkey_ = passkey; };
 
  protected:
+  // r4sGate callback mechanism variables  
+  uint8_t send_data_handle_{0};  // 2=auth, 3=time
+  uint8_t send_data_[32];        // Data to send via callback
+  size_t send_data_len_{0};      // Length of data to send
+  
   uint32_t passkey_{0};
   std::string meter_address_{""};
   uint32_t receive_timeout_ms_{500};

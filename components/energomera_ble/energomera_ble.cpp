@@ -712,7 +712,79 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
   ESP_LOGD(TAG, ">>>>>>>>>> GAP gap_event_handler: %d", event);
 // receiving events 18, 10, 2, 7, 9 , 8 then auth complete then 8 
   switch (event) {
+    case ESP_GAP_BLE_PASSKEY_REQ_EVT: {
+      ESP_LOGD(TAG, "GAP passkey request event - sending passkey %d", this->passkey_);
+      esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, this->passkey_);
+      break;
+    }
+    case ESP_GAP_BLE_SEC_REQ_EVT: {
+      ESP_LOGD(TAG, "GAP security request event - granting security");
+      esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+      break;
+    }
+    case ESP_GAP_BLE_AUTH_CMPL_EVT: {
+      if (param->ble_security.auth_cmpl.success) {
+        ESP_LOGD(TAG, "GAP authentication completed successfully");
+      } else {
+        ESP_LOGW(TAG, "GAP authentication failed, reason: %d", param->ble_security.auth_cmpl.fail_reason);
+      }
+      break;
+    }
+    case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT: {
+      // This is the callback mechanism from r4sGate.c!
+      ESP_LOGD(TAG, "RSSI read complete, triggering callback write mechanism");
+      ESP_LOGD(TAG, "sendDataHandle=%d, sendDataLen=%d", this->send_data_handle_, this->send_data_len_);
+      
+      if (param->read_rssi_cmpl.status != ESP_BT_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "RSSI read failed with status: %d", param->read_rssi_cmpl.status);
+        return;
+      }
+      
+      // Process callback based on send_data_handle_ like in r4sGate.c
+      uint16_t char_handle = 0;
+      
+      // For CE208 (DEV_TYP == 73):
+      if (this->send_data_handle_ == 2) {
+        // Auth handle (char2_handle in original code)
+        char_handle = 0x001e;
+        ESP_LOGD(TAG, "Writing auth data (0xFF) to char2_handle 0x%04x", char_handle);
+      } else if (this->send_data_handle_ == 3) {
+        // Time handle (char5_handle in original code)  
+        char_handle = 0x0031;
+        ESP_LOGD(TAG, "Writing time data to char5_handle 0x%04x", char_handle);
+      } else {
+        ESP_LOGW(TAG, "Unknown sendDataHandle: %d", this->send_data_handle_);
+        return;
+      }
+      
+      // Perform the actual write using ESP_GATT_WRITE_TYPE_RSP as in original
+      esp_err_t status = esp_ble_gattc_write_char(
+        this->parent()->get_gattc_if(),
+        this->parent()->get_conn_id(), 
+        char_handle,
+        this->send_data_len_,
+        this->send_data_,
+        ESP_GATT_WRITE_TYPE_RSP,
+        ESP_GATT_AUTH_REQ_NONE
+      );
+      
+      if (status == ESP_OK) {
+        ESP_LOGD(TAG, "r4sGate callback write successful to handle 0x%04x, len=%d", char_handle, this->send_data_len_);
+        if (this->send_data_handle_ == 2) {
+          // Auth command sent, expect response
+          this->waiting_for_auth_response_ = true;
+        }
+      } else {
+        ESP_LOGW(TAG, "r4sGate callback write failed to handle 0x%04x, status=%d", char_handle, status);
+      }
+      
+      // Clear the handle to prevent accidental reuse
+      this->send_data_handle_ = 0;
+      break;
+    }
     // This event is sent once authentication has completed
+    default:
+      break;
   }
 }
 
@@ -1170,65 +1242,66 @@ void EnergomeraBleComponent::send_auth_command() {
   }
   
   ESP_LOGD(TAG, "Time is valid, proceeding with authentication");
-  ESP_LOGD(TAG, "Sending authentication command (0xFF) via TX characteristic");
+  ESP_LOGD(TAG, "Starting CE208 authentication sequence using r4sGate method");
   
-  // All commands go through TX characteristic - use 0xFF command code for authentication
-  // This should trigger the meter to respond on the auth handle (0x001e)
-  this->send_command(0xFF, nullptr, 0);
+  // Step 1: Send authentication command (0xFF) to auth handle (2)
+  this->send_data_handle_ = 2;  // auth handle
+  this->send_data_[0] = 0xFF;
+  this->send_data_len_ = 1;
   this->waiting_for_auth_response_ = true;
   
-  // Schedule time sync command
-  this->set_timeout("time_sync", 500, [this]() { this->send_time_sync(); });
+  // Trigger auth write using RSSI read callback mechanism
+  esp_ble_gap_read_rssi(this->parent()->get_remote_bda());
+  
+  // Schedule time sync command after a short delay
+  this->set_timeout("time_sync", 200, [this]() { this->send_time_sync(); });
 }
 
 void EnergomeraBleComponent::send_time_sync() {
   ESP_LOGD(TAG, "Sending time synchronization");
-
-  // Check if time source is available and time is valid
+  
   if (!this->time_source_) {
-    ESP_LOGW(TAG, "No time source configured - authentication aborted");
-    this->mark_failed();
+    ESP_LOGW(TAG, "No time source configured - time sync skipped");
     return;
   }
   
   auto time = this->time_source_->now();
   if (!time.is_valid()) {
-    ESP_LOGW(TAG, "Time source not synchronized yet - authentication aborted, will retry later");
-    this->mark_failed();
+    ESP_LOGW(TAG, "Time not synchronized - time sync skipped");
     return;
   }
   
-  // Use valid time from ESPHome time source
-  ESP_LOGD(TAG, "Using synchronized time: %04d-%02d-%02d %02d:%02d:%02d", 
-           time.year, time.month, time.day_of_month, time.hour, time.minute, time.second);
-           
+  // Format time data exactly like r4sGate.c for CE208 (8 bytes)
   struct tm timeinfo;
-  timeinfo.tm_year = time.year - 1900;
-  timeinfo.tm_mon = time.month - 1;
+  timeinfo.tm_year = time.year - 1900;  // tm_year is years since 1900
+  timeinfo.tm_mon = time.month - 1;     // tm_mon is 0-11
   timeinfo.tm_mday = time.day_of_month;
   timeinfo.tm_hour = time.hour;
   timeinfo.tm_min = time.minute;
   timeinfo.tm_sec = time.second;
-  timeinfo.tm_wday = time.day_of_week - 1; // ESPHome uses 1=Sunday, tm uses 0=Sunday
+  timeinfo.tm_wday = time.day_of_week == 1 ? 0 : time.day_of_week - 1; // Convert ESPHome Sunday=1 to tm Sunday=0
   
-  // Prepare 8-byte time data as per reference implementation
   uint8_t time_data[8];
-  time_data[0] = (timeinfo.tm_year + 1900) / 100;  // Century (20 for 2024)
-  time_data[1] = (timeinfo.tm_year + 1900) % 100;  // Year (24 for 2024)
-  time_data[2] = timeinfo.tm_mon + 1;              // Month (1-12)
-  time_data[3] = timeinfo.tm_mday;                 // Day (1-31)
-  time_data[4] = timeinfo.tm_hour;                 // Hour (0-23)
-  time_data[5] = timeinfo.tm_min;                  // Minute (0-59)
-  time_data[6] = timeinfo.tm_sec;                  // Second (0-59)
-  time_data[7] = timeinfo.tm_wday;                 // Day of week (0=Sunday)
+  time_data[0] = timeinfo.tm_year / 100 + 19;  // Same formula as r4sGate.c
+  time_data[1] = timeinfo.tm_year % 100;
+  time_data[2] = timeinfo.tm_mon + 1;          // Convert back to 1-12
+  time_data[3] = timeinfo.tm_mday;
+  time_data[4] = timeinfo.tm_hour;
+  time_data[5] = timeinfo.tm_min;
+  time_data[6] = timeinfo.tm_sec;
+  time_data[7] = timeinfo.tm_wday;             // Sunday=0, Monday=1, etc.
   
-  ESP_LOGD(TAG, "Time sync data: %02d%02d-%02d-%02d %02d:%02d:%02d wday=%d", 
-           time_data[0], time_data[1], time_data[2], time_data[3], 
-           time_data[4], time_data[5], time_data[6], time_data[7]);
+  ESP_LOGD(TAG, "r4sGate time format: %02d%02d-%02d-%02d %02d:%02d:%02d wday=%d", 
+    time_data[0], time_data[1], time_data[2], time_data[3],
+    time_data[4], time_data[5], time_data[6], time_data[7]);
   
-  // Send time sync command via TX characteristic with 8-byte time data
-  // Use 0xFE command code to indicate time synchronization
-  this->send_command(0xFE, time_data, sizeof(time_data));
+  // Step 2: Send time sync command to time handle (3) - exactly like r4sGate.c
+  memcpy(this->send_data_, time_data, 8);
+  this->send_data_len_ = 8;
+  this->send_data_handle_ = 3;  // time handle
+  
+  // Trigger time write using RSSI read callback mechanism
+  esp_ble_gap_read_rssi(this->parent()->get_remote_bda());
   
   // Set timeout to wait for 20-byte authorization response
   this->set_timeout("auth_check", 2000, [this]() {
