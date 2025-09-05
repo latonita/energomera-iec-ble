@@ -1172,28 +1172,12 @@ void EnergomeraBleComponent::send_auth_command() {
   ESP_LOGD(TAG, "Time is valid, proceeding with authentication");
   ESP_LOGD(TAG, "Sending authentication command (0xFF)");
   
-  // Send single 0xFF byte to auth characteristic (char2_handle)
-  uint8_t auth_data[] = {0xFF};
+  // Use send_command method with 0xFF command and no data
+  this->send_command(0xFF, nullptr, 0);
+  this->waiting_for_auth_response_ = true;
   
-  esp_err_t status = esp_ble_gattc_write_char(
-    this->parent()->get_gattc_if(), 
-    this->parent()->get_conn_id(), 
-    this->auth_handle_,  // Use auth handle (char2_handle equivalent)
-    sizeof(auth_data), 
-    auth_data, 
-    ESP_GATT_WRITE_TYPE_RSP,  // Write with response as per reference
-    ESP_GATT_AUTH_REQ_NONE
-  );
-
-  if (status == ESP_OK) {
-    ESP_LOGD(TAG, "Auth command sent successfully to handle 0x%04x", this->auth_handle_);
-    this->waiting_for_auth_response_ = true;
-    // Schedule time sync command
-    this->set_timeout("time_sync", 500, [this]() { this->send_time_sync(); });
-  } else {
-    ESP_LOGW(TAG, "Failed to send auth command, status=%d", status);
-    this->mark_failed();
-  }
+  // Schedule time sync command
+  this->set_timeout("time_sync", 500, [this]() { this->send_time_sync(); });
 }
 
 void EnergomeraBleComponent::send_time_sync() {
@@ -1227,7 +1211,6 @@ void EnergomeraBleComponent::send_time_sync() {
   timeinfo.tm_wday = time.day_of_week - 1; // ESPHome uses 1=Sunday, tm uses 0=Sunday
   
   // Prepare 8-byte time data as per reference implementation
-  
   uint8_t time_data[8];
   time_data[0] = (timeinfo.tm_year + 1900) / 100;  // Century (20 for 2024)
   time_data[1] = (timeinfo.tm_year + 1900) % 100;  // Year (24 for 2024)
@@ -1242,28 +1225,16 @@ void EnergomeraBleComponent::send_time_sync() {
            time_data[0], time_data[1], time_data[2], time_data[3], 
            time_data[4], time_data[5], time_data[6], time_data[7]);
   
-  esp_err_t status = esp_ble_gattc_write_char(
-    this->parent()->get_gattc_if(), 
-    this->parent()->get_conn_id(), 
-    this->time_handle_,  // Use time handle (char5_handle equivalent)
-    sizeof(time_data), 
-    time_data, 
-    ESP_GATT_WRITE_TYPE_RSP,  // Write with response
-    ESP_GATT_AUTH_REQ_NONE
-  );
-
-  if (status == ESP_OK) {
-    ESP_LOGD(TAG, "Time sync sent successfully to handle 0x%04x", this->time_handle_);
-    // Set timeout to wait for 20-byte authorization response
-    this->set_timeout("auth_check", 2000, [this]() {
-      if (!this->authenticated_) {
-        ESP_LOGW(TAG, "Authentication timeout - no 20-byte response received");
-        this->mark_failed();
-      }
-    });
-  } else {
-    ESP_LOGW(TAG, "Failed to send time sync, status=%d", status);
-  }
+  // Use send_command method with 0xFE command and 8-byte time data
+  this->send_command(0xFE, time_data, sizeof(time_data));
+  
+  // Set timeout to wait for 20-byte authorization response
+  this->set_timeout("auth_check", 2000, [this]() {
+    if (!this->authenticated_) {
+      ESP_LOGW(TAG, "Authentication timeout - no 20-byte response received");
+      this->mark_failed();
+    }
+  });
 }
 
 void EnergomeraBleComponent::receive_data(uint8_t *data, size_t length) {
