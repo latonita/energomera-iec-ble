@@ -139,10 +139,6 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
 
   void setup_characteristics();
 
-  // BLE characteristics
-  esp32_ble_client::BLECharacteristic *tx_char_{nullptr};
-  esp32_ble_client::BLECharacteristic *rx_char_{nullptr};
-
   // UUID definitions
   static constexpr uint8_t CEREMOTE_SERVICE_UUID[16] = {0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97,
                                                         0xe2, 0x45, 0xef, 0x8b, 0x00, 0x01, 0x1b, 0xb9};

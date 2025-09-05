@@ -804,8 +804,8 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       ESP_LOGI(TAG, "Disconnected from CE208 meter");
       this->authenticated_ = false;
       this->ready_to_communicate_ = false;
-      this->tx_char_ = nullptr;
-      this->rx_char_ = nullptr;
+      this->tx_found_ = false;
+      this->rx0_found_ = false;
       this->node_state = espbt::ClientState::IDLE;
       break;
     }
@@ -1089,8 +1089,8 @@ void EnergomeraBleComponent::handle_response(uint8_t *data, size_t len) {
 }
 
 void EnergomeraBleComponent::send_command(uint8_t cmd, uint8_t *data, size_t data_len) {
-  if (this->tx_char_ == nullptr) {
-    ESP_LOGW(TAG, "TX characteristic not available");
+  if (!this->tx_found_) {
+    ESP_LOGW(TAG, "TX characteristic not found");
     return;
   }
 
@@ -1108,15 +1108,24 @@ void EnergomeraBleComponent::send_command(uint8_t cmd, uint8_t *data, size_t dat
 
   ESP_LOGD(TAG, "Sending command 0x%02X", cmd);
 
-  // Use ESPHome's characteristic write method
-  auto status =
-      esp_ble_gattc_write_char(this->parent()->get_gattc_if(), this->parent()->get_conn_id(), this->tx_char_->handle,
-                               packet_len, packet, ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+  // Use handle-based BLE write instead of characteristic object
+  esp_err_t status = esp_ble_gattc_write_char(
+    this->parent()->get_gattc_if(), 
+    this->parent()->get_conn_id(), 
+    this->tx_handle_,  // Use the handle directly
+    packet_len, 
+    packet, 
+    ESP_GATT_WRITE_TYPE_RSP, 
+    ESP_GATT_AUTH_REQ_NONE
+  );
 
   if (status == ESP_OK) {
+    ESP_LOGD(TAG, "Command sent successfully to handle 0x%04x", this->tx_handle_);
     this->waiting_for_response_ = true;
     this->last_command_ = cmd;
     this->response_timeout_ = millis() + 2000;
+  } else {
+    ESP_LOGW(TAG, "Failed to send command, status=%d", status);
   }
 }
 
