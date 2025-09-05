@@ -1153,6 +1153,23 @@ void EnergomeraBleComponent::send_command(uint8_t cmd, uint8_t *data, size_t dat
 }
 
 void EnergomeraBleComponent::send_auth_command() {
+  ESP_LOGD(TAG, "Attempting authentication");
+  
+  // Check if time is valid before starting authentication
+  if (!this->time_source_) {
+    ESP_LOGW(TAG, "No time source configured - authentication cannot proceed");
+    this->mark_failed();
+    return;
+  }
+  
+  auto time = this->time_source_->now();
+  if (!time.is_valid()) {
+    ESP_LOGW(TAG, "Time not synchronized yet - authentication postponed, will retry later");
+    this->mark_failed();
+    return;
+  }
+  
+  ESP_LOGD(TAG, "Time is valid, proceeding with authentication");
   ESP_LOGD(TAG, "Sending authentication command (0xFF)");
   
   // Send single 0xFF byte to auth characteristic (char2_handle)
@@ -1175,38 +1192,39 @@ void EnergomeraBleComponent::send_auth_command() {
     this->set_timeout("time_sync", 500, [this]() { this->send_time_sync(); });
   } else {
     ESP_LOGW(TAG, "Failed to send auth command, status=%d", status);
+    this->mark_failed();
   }
 }
 
 void EnergomeraBleComponent::send_time_sync() {
   ESP_LOGD(TAG, "Sending time synchronization");
 
-  struct tm timeinfo;
-  
   // Check if time source is available and time is valid
   if (!this->time_source_) {
-    ESP_LOGW(TAG, "No time source configured, using default time");
-    time_t now = 1640995200; // 2022-01-01 00:00:00 as fallback
-    localtime_r(&now, &timeinfo);
-  } else {
-    auto time = this->time_source_->now();
-    if (!time.is_valid()) {
-      ESP_LOGW(TAG, "Time source not synchronized yet, using default time");
-      time_t now = 1640995200; // 2022-01-01 00:00:00 as fallback
-      localtime_r(&now, &timeinfo);
-    } else {
-      // Use valid time from ESPHome time source
-      ESP_LOGD(TAG, "Using synchronized time: %04d-%02d-%02d %02d:%02d:%02d", 
-               time.year, time.month, time.day_of_month, time.hour, time.minute, time.second);
-      timeinfo.tm_year = time.year - 1900;
-      timeinfo.tm_mon = time.month - 1;
-      timeinfo.tm_mday = time.day_of_month;
-      timeinfo.tm_hour = time.hour;
-      timeinfo.tm_min = time.minute;
-      timeinfo.tm_sec = time.second;
-      timeinfo.tm_wday = time.day_of_week - 1; // ESPHome uses 1=Sunday, tm uses 0=Sunday
-    }
+    ESP_LOGW(TAG, "No time source configured - authentication aborted");
+    this->mark_failed();
+    return;
   }
+  
+  auto time = this->time_source_->now();
+  if (!time.is_valid()) {
+    ESP_LOGW(TAG, "Time source not synchronized yet - authentication aborted, will retry later");
+    this->mark_failed();
+    return;
+  }
+  
+  // Use valid time from ESPHome time source
+  ESP_LOGD(TAG, "Using synchronized time: %04d-%02d-%02d %02d:%02d:%02d", 
+           time.year, time.month, time.day_of_month, time.hour, time.minute, time.second);
+           
+  struct tm timeinfo;
+  timeinfo.tm_year = time.year - 1900;
+  timeinfo.tm_mon = time.month - 1;
+  timeinfo.tm_mday = time.day_of_month;
+  timeinfo.tm_hour = time.hour;
+  timeinfo.tm_min = time.minute;
+  timeinfo.tm_sec = time.second;
+  timeinfo.tm_wday = time.day_of_week - 1; // ESPHome uses 1=Sunday, tm uses 0=Sunday
   
   // Prepare 8-byte time data as per reference implementation
   
