@@ -1,3 +1,15 @@
+// CE208 Electric Meter BLE Communication - Updated per reference implementation
+// 
+// Key changes based on r4sGate.c analysis:
+// 1. Authentication sequence: Send 0xFF to auth handle, then 8-byte time data to time handle
+// 2. Use ESP_GATT_WRITE_TYPE_RSP (write with response) instead of ESP_GATT_WRITE_TYPE_NO_RSP
+// 3. Authentication success confirmed by 20-byte response (not command-response format)
+// 4. Correct characteristic handle mapping:
+//    - TX handle (0x0021): for commands 
+//    - Auth handle (0x001e): for 0xFF auth command (sendDataHandle=2)
+//    - Time handle (0x0031): for 8-byte time sync (sendDataHandle=3)
+// 5. Time format: [century][year][month][day][hour][min][sec][wday]
+
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/application.h"
