@@ -698,7 +698,7 @@ void EnergomeraBleComponent::queue_single_read(const std::string &request) {
 
 void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
   ESP_LOGD(TAG, ">>>>>>>>>> GAP gap_event_handler: %d", event);
-
+// receiving events 18, 10, 2, 7, 9 , 8 then auth complete then 8 
   switch (event) {
     // This event is sent once authentication has completed
   }
