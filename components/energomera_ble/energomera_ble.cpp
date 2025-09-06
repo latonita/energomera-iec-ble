@@ -1326,17 +1326,34 @@ void EnergomeraBleComponent::handle_response(uint8_t *data, size_t len) {
     this->cancel_timeout("auth_check");
     ESP_LOGI(TAG, "Ready for data communication using IEC 61107 protocol");
     
-    // Parse response to extract device info if needed
-    // Continue processing this response as it contains useful device information
+    // For IEC 61107, the response format is different - don't process as old protocol
+    // The response contains device identification information
+    // TODO: Parse device ID and other parameters if needed
+    
+    // Now that we're authenticated, request meter parameters
+    this->set_timeout("request_params", 1000, [this]() {
+      ESP_LOGI(TAG, "🔄 Starting parameter request after successful authentication");
+      this->send_params_request();
+    });
+    
+    return;  // Don't continue processing as old protocol format
   }
 
-  // Handle other responses
+  // Handle other responses (only for non-authentication responses)
   if (len < 3)
     return;  // Invalid response
 
-  // Validate response format: should start with 0x55 and match command counter
+  // For IEC 61107 responses, check if this is a data response
+  if (this->authenticated_) {
+    // This is a data response in IEC 61107 format
+    ESP_LOGI(TAG, "Received IEC 61107 data response: %d bytes", len);
+    // TODO: Process IEC 61107 data response format
+    return;
+  }
+
+  // Legacy protocol validation (for non-IEC 61107 responses)
   if (data[0] != 0x55) {
-    ESP_LOGW(TAG, "Invalid response format");
+    ESP_LOGW(TAG, "Invalid legacy response format (expected 0x55, got 0x%02X)", data[0]);
     return;
   }
 
