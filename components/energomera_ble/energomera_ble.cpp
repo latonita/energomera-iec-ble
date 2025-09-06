@@ -699,8 +699,13 @@ void EnergomeraBleComponent::update() {
     return;
   }
 
-  ESP_LOGD(TAG, "Starting data collection. but its not implemented yet");
-  //this->set_next_state_(State::TRY_LOCK_BUS);
+  if (!this->authenticated_) {
+    ESP_LOGD(TAG, "Not yet authenticated, skipping update");
+    return;
+  }
+
+  ESP_LOGD(TAG, "Starting data collection using IEC 61107 protocol");
+  this->send_params_request();
 }
 
 void EnergomeraBleComponent::queue_single_read(const std::string &request) {
@@ -1123,24 +1128,18 @@ void EnergomeraBleComponent::handle_response(uint8_t *data, size_t len) {
   
   ESP_LOGD(TAG, "RX: %s", format_frame_pretty(data, len).c_str());
 
-  // Check for CE208 authorization response (any response after auth+time sequence may indicate success)
+  // Check for IEC 61107 handshake response (indicates successful authentication)
   if (!this->authenticated_ && this->waiting_for_auth_response_) {
-    if (len == 20) {
-      ESP_LOGI(TAG, "CE208 authentication successful - received expected 20-byte authorization response");
-    } else if (len > 0) {
-      ESP_LOGI(TAG, "CE208 authentication assumed successful - received %d-byte response after auth+time", len);
-    }
+    ESP_LOGI(TAG, "Received IEC 61107 response - authentication successful");
+    ESP_LOG_BUFFER_HEX(TAG, data, len);
+    
     this->authenticated_ = true;
     this->waiting_for_auth_response_ = false;
     this->cancel_timeout("auth_check");
-    ESP_LOGI(TAG, "Ready for data communication");
+    ESP_LOGI(TAG, "Ready for data communication using IEC 61107 protocol");
     
-    // If it's not a 20-byte response, continue processing as it might be actual data
-    if (len != 20) {
-      // Continue processing this response as normal data
-    } else {
-      return;  // 20-byte responses are just auth confirmation
-    }
+    // Parse response to extract device info if needed
+    // Continue processing this response as it contains useful device information
   }
 
   // Handle other responses
@@ -1194,6 +1193,50 @@ void EnergomeraBleComponent::handle_response(uint8_t *data, size_t len) {
   }
 }
 
+void EnergomeraBleComponent::send_params_request() {
+  if (!this->authenticated_) {
+    ESP_LOGW(TAG, "Not authenticated, cannot send params request");
+    return;
+  }
+  
+  ESP_LOGD(TAG, "Sending IEC 61107 params request (VOLTA/CURRE/POWEP)");
+  
+  // IEC 61107 command from Android app ASK_PARAMS (i=3): /?!R1GRPNM(CRCPR()VOLTA()CURRE()POWEP()STAT_())
+  uint8_t params_cmd[] = {
+    47, 63, 33, 1, 82, 49, 2, 71, 82, 80, 78, 77, 40, 67, 82, 67, 80, 82, 40, 41, 
+    86, 79, 76, 84, 65, 40, 41, 67, 85, 82, 82, 69, 40, 41, 80, 79, 87, 69, 80, 40, 
+    41, 83, 84, 65, 84, 95, 40, 41, 41, 3, 0
+  };
+  
+  // Calculate and set checksum (last byte)
+  uint8_t checksum = 0;
+  for (int i = 4; i < sizeof(params_cmd) - 5; i++) {
+    checksum += params_cmd[i];
+  }
+  params_cmd[sizeof(params_cmd) - 1] = checksum & 0x7F;
+  
+  ESP_LOGD(TAG, "Sending IEC 61107 params command:");
+  ESP_LOG_BUFFER_HEX(TAG, params_cmd, sizeof(params_cmd));
+  
+  // Send to TX characteristic
+  esp_err_t status = esp_ble_gattc_write_char(
+    this->parent()->get_gattc_if(),
+    this->parent()->get_conn_id(), 
+    this->tx_handle_,
+    sizeof(params_cmd),
+    params_cmd,
+    ESP_GATT_WRITE_TYPE_RSP,  // Write with response
+    ESP_GATT_AUTH_REQ_NONE
+  );
+  
+  if (status == ESP_OK) {
+    ESP_LOGD(TAG, "IEC 61107 params request sent successfully");
+    this->last_command_ = 3;  // ASK_PARAMS
+  } else {
+    ESP_LOGW(TAG, "Failed to send IEC 61107 params request, status=%d", status);
+  }
+}
+
 void EnergomeraBleComponent::send_command(uint8_t cmd, uint8_t *data, size_t data_len) {
   if (!this->tx_found_) {
     ESP_LOGW(TAG, "TX characteristic not found");
@@ -1236,9 +1279,8 @@ void EnergomeraBleComponent::send_command(uint8_t cmd, uint8_t *data, size_t dat
 }
 
 void EnergomeraBleComponent::send_auth_command() {
-  ESP_LOGD(TAG, "Attempting authentication");
+  ESP_LOGD(TAG, "Starting IEC 61107 authentication for CE208/CE308");
   
-  // Check if time is valid before starting authentication
   if (!this->time_source_) {
     ESP_LOGW(TAG, "No time source configured - authentication cannot proceed");
     this->mark_failed();
@@ -1252,20 +1294,52 @@ void EnergomeraBleComponent::send_auth_command() {
     return;
   }
   
-  ESP_LOGD(TAG, "Time is valid, proceeding with authentication");
-  ESP_LOGD(TAG, "Starting CE208 authentication sequence using r4sGate method");
+  ESP_LOGD(TAG, "Sending IEC 61107 handshake command (ASK_EMD_WATCH)");
   
-  // Step 1: Send authentication command (0xFF) to auth handle (2)
-  this->send_data_handle_ = 2;  // auth handle
-  this->send_data_[0] = 0xFF;
-  this->send_data_len_ = 1;
+  // IEC 61107 command from Android app: /?!R1GRPNM(WATCH()ID_FW()PROFI()EMD01(0.0,FF))
+  // This requests initial device info and serves as authentication handshake
+  uint8_t handshake_cmd[] = {
+    47, 63, 33, 1, 82, 49, 2, 71, 82, 80, 78, 77, 40, 87, 65, 84, 67, 72, 40, 41, 
+    73, 68, 95, 70, 87, 40, 41, 80, 82, 79, 70, 73, 40, 41, 69, 77, 68, 48, 49, 40, 
+    48, 46, 48, 44, 70, 70, 41, 41, 3, 0
+  };
+  
+  // Calculate and set checksum (last byte)
+  uint8_t checksum = 0;
+  for (int i = 4; i < sizeof(handshake_cmd) - 5; i++) {
+    checksum += handshake_cmd[i];
+  }
+  handshake_cmd[sizeof(handshake_cmd) - 1] = checksum & 0x7F;
+  
+  ESP_LOGD(TAG, "Sending IEC 61107 handshake:");
+  ESP_LOG_BUFFER_HEX(TAG, handshake_cmd, sizeof(handshake_cmd));
+  
   this->waiting_for_auth_response_ = true;
   
-  // Trigger auth write using RSSI read callback mechanism
-  esp_ble_gap_read_rssi(this->parent()->get_remote_bda());
+  // Send to TX characteristic using the correct BLE service
+  esp_err_t status = esp_ble_gattc_write_char(
+    this->parent()->get_gattc_if(),
+    this->parent()->get_conn_id(), 
+    this->tx_handle_,  // TX characteristic from Android app
+    sizeof(handshake_cmd),
+    handshake_cmd,
+    ESP_GATT_WRITE_TYPE_RSP,  // Write with response
+    ESP_GATT_AUTH_REQ_NONE
+  );
   
-  // Immediately send time sync after auth (no delay, just like r4sGate.c)
-  this->send_time_sync_immediate();
+  if (status == ESP_OK) {
+    ESP_LOGD(TAG, "IEC 61107 handshake sent successfully");
+    // Set timeout for response
+    this->set_timeout("auth_check", 5000, [this]() {
+      if (!this->authenticated_) {
+        ESP_LOGW(TAG, "IEC 61107 handshake timeout - no response received");
+        this->mark_failed();
+      }
+    });
+  } else {
+    ESP_LOGW(TAG, "Failed to send IEC 61107 handshake, status=%d", status);
+    this->mark_failed();
+  }
 }
 
 void EnergomeraBleComponent::send_time_sync_immediate() {
