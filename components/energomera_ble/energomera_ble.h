@@ -166,6 +166,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   bool mtu_negotiated_{false};   // Whether MTU negotiation completed
 
   void setup_characteristics();
+  void read_version_characteristic();
 
   // UUID definitions
   static constexpr uint8_t CEREMOTE_SERVICE_UUID[16] = {0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97,
@@ -337,6 +338,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   int response_length_{0};        // Current response length
   int packets_to_read_{0};        // Number of characteristics to read
   int current_char_index_{0};     // Current characteristic being read
+  bool reading_version_{false};   // True when reading version characteristic
 
  private:
   static uint8_t next_obj_id_;

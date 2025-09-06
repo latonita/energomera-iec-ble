@@ -832,6 +832,7 @@ void EnergomeraBleComponent::setup_characteristics() {
 
   // Enable notifications on RX0 characteristic if found
   if (this->rx0_found_) {
+    ESP_LOGI(TAG, "📡 Following BLE Implementation Guide: Enabling notifications on TX characteristic (b91b0105)");
     esp_err_t notify_status = esp_ble_gattc_register_for_notify(
       this->parent()->get_gattc_if(), 
       this->parent()->get_remote_bda(),
@@ -840,8 +841,28 @@ void EnergomeraBleComponent::setup_characteristics() {
     if (notify_status != ESP_OK) {
       ESP_LOGE(TAG, "Failed to register for notifications, status=%d", notify_status);
     } else {
-      ESP_LOGD(TAG, "Successfully registered for notifications on handle 0x%04x", this->rx0_handle_);
+      ESP_LOGI(TAG, "✅ Successfully registered for notifications on handle 0x%04x", this->rx0_handle_);
     }
+  }
+}
+
+void EnergomeraBleComponent::read_version_characteristic() {
+  ESP_LOGI(TAG, "📖 Following BLE Implementation Guide: Reading version characteristic (b91b0101) first");
+  
+  this->reading_version_ = true;  // Mark that we're reading version
+  
+  esp_err_t status = esp_ble_gattc_read_char(
+    this->parent()->get_gattc_if(),
+    this->parent()->get_conn_id(),
+    this->rx0_handle_,  // Version characteristic is at RX0 handle (b91b0101)
+    ESP_GATT_AUTH_REQ_NONE
+  );
+  
+  if (status != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to read version characteristic, status=%d", status);
+    this->reading_version_ = false;
+    // Continue with authentication anyway
+    this->start_authentication();
   }
 }
 
@@ -889,7 +910,9 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         ESP_LOGI(TAG, "Registered for notifications");
         this->authenticated_ = false;
         this->ready_to_communicate_ = true;
-        this->start_authentication();
+        
+        // According to BLE guide: Read version characteristic first before authentication
+        this->read_version_characteristic();
       }
       break;
     }
@@ -929,6 +952,23 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 
     case ESP_GATTC_READ_CHAR_EVT: {
       if (param->read.status == ESP_GATT_OK) {
+        // Check if this is a version characteristic read
+        if (this->reading_version_) {
+          ESP_LOGI(TAG, "✅ Version characteristic read successful: length=%d", param->read.value_len);
+          ESP_LOG_BUFFER_HEX(TAG, param->read.value, param->read.value_len);
+          
+          // Store version info if needed
+          // TODO: Parse version information from param->read.value
+          
+          this->reading_version_ = false;
+          
+          // Now proceed with authentication as per BLE guide
+          ESP_LOGI(TAG, "🔐 Version read complete, starting IEC 61107 authentication sequence");
+          this->start_authentication();
+          return;
+        }
+        
+        // Handle response characteristic reads
         ESP_LOGD(TAG, "Read characteristic %d: length=%d", this->current_char_index_, param->read.value_len);
         ESP_LOG_BUFFER_HEX(TAG, param->read.value, param->read.value_len);
         
@@ -948,7 +988,14 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
           this->process_complete_response();
         }
       } else {
-        ESP_LOGW(TAG, "Failed to read characteristic %d, status=%d", this->current_char_index_, param->read.status);
+        if (this->reading_version_) {
+          ESP_LOGW(TAG, "Failed to read version characteristic, status=%d", param->read.status);
+          this->reading_version_ = false;
+          // Continue with authentication anyway
+          this->start_authentication();
+        } else {
+          ESP_LOGW(TAG, "Failed to read characteristic %d, status=%d", this->current_char_index_, param->read.status);
+        }
       }
       break;
     }
@@ -1369,7 +1416,7 @@ void EnergomeraBleComponent::send_command(uint8_t cmd, uint8_t *data, size_t dat
   }
 }
 
-// Add parity bit to a byte (BLE-specific requirement)
+// Add parity bit to a byte (BLE-specific requirement per BLE Implementation Guide)
 uint8_t EnergomeraBleComponent::add_parity(uint8_t byte) {
   int parity_count = 0;
   
@@ -1385,6 +1432,9 @@ uint8_t EnergomeraBleComponent::add_parity(uint8_t byte) {
   if ((parity_count & 1) == 1) {
     result = result & 0x7F; // Clear MSB
   }
+  
+  ESP_LOGVV(TAG, "Parity: 0x%02X -> 0x%02X (bit count: %d, %s parity)", 
+            byte, result, parity_count, (parity_count & 1) ? "odd" : "even");
   
   return result;
 }
