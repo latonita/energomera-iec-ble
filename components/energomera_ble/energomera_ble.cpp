@@ -830,18 +830,33 @@ void EnergomeraBleComponent::setup_characteristics() {
   ESP_LOGI(TAG, "✓ RX4/Time characteristic at handle 0x%04x", this->time_handle_);
   ESP_LOGI(TAG, "All CE208 characteristics configured successfully!");
 
-  // Enable notifications on RX0 characteristic if found
-  if (this->rx0_found_) {
+  // Enable notifications on TX characteristic as per BLE Implementation Guide
+  if (this->tx_found_) {
     ESP_LOGI(TAG, "📡 Following BLE Implementation Guide: Enabling notifications on TX characteristic (b91b0105)");
+    esp_err_t notify_status = esp_ble_gattc_register_for_notify(
+      this->parent()->get_gattc_if(), 
+      this->parent()->get_remote_bda(),
+      this->tx_handle_  // Use TX handle, not RX0 handle!
+    );
+    if (notify_status != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to register for notifications on TX, status=%d", notify_status);
+    } else {
+      ESP_LOGI(TAG, "✅ Successfully registered for notifications on TX handle 0x%04x", this->tx_handle_);
+    }
+  }
+  
+  // Also enable notifications on RX0 for additional response data
+  if (this->rx0_found_) {
+    ESP_LOGI(TAG, "📡 Also enabling notifications on RX0 characteristic (b91b0101) for response data");
     esp_err_t notify_status = esp_ble_gattc_register_for_notify(
       this->parent()->get_gattc_if(), 
       this->parent()->get_remote_bda(),
       this->rx0_handle_
     );
     if (notify_status != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to register for notifications, status=%d", notify_status);
+      ESP_LOGE(TAG, "Failed to register for notifications on RX0, status=%d", notify_status);
     } else {
-      ESP_LOGI(TAG, "✅ Successfully registered for notifications on handle 0x%04x", this->rx0_handle_);
+      ESP_LOGI(TAG, "✅ Successfully registered for notifications on RX0 handle 0x%04x", this->rx0_handle_);
     }
   }
 }
@@ -907,12 +922,19 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 
     case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
       if (param->reg_for_notify.status == ESP_GATT_OK) {
-        ESP_LOGI(TAG, "Registered for notifications");
-        this->authenticated_ = false;
-        this->ready_to_communicate_ = true;
+        this->notifications_registered_++;
+        ESP_LOGI(TAG, "Registered for notifications (%d/2)", this->notifications_registered_);
         
-        // According to BLE guide: Read version characteristic first before authentication
-        this->read_version_characteristic();
+        // Wait for both TX and RX0 notifications to be registered
+        if (this->notifications_registered_ >= 2) {
+          this->authenticated_ = false;
+          this->ready_to_communicate_ = true;
+          
+          // According to BLE guide: Read version characteristic first before authentication
+          this->read_version_characteristic();
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to register for notifications, status=%d", param->reg_for_notify.status);
       }
       break;
     }
@@ -969,20 +991,21 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         this->waiting_for_response_ = true;
         this->response_timeout_ = millis() + 2000;
         
-        // According to BLE guide: After sending command, start reading response characteristics
-        // Give the meter a moment to process, then start reading
-        this->set_timeout("start_response_read", 100, [this]() {
-          ESP_LOGD(TAG, "Starting response read from characteristics after command");
-          // Start reading from the first response characteristic (RX1 = b91b0106)
-          this->start_response_reading(5);  // Try reading from first 5 characteristics
+        // According to BLE guide: After sending command, wait for TX notification first
+        // Give the meter time to process and send notification
+        this->set_timeout("wait_tx_notification", 500, [this]() {
+          if (this->waiting_for_response_) {
+            ESP_LOGD(TAG, "No TX notification received, trying response characteristic reads");
+            // Try reading from response characteristics as fallback
+            this->start_response_reading(3);  // Try first 3 characteristics
+          }
         });
         
-        // Also set a fallback timeout in case no response comes
-        this->set_timeout("response_timeout", 3000, [this]() {
+        // Also set a final fallback timeout in case nothing works
+        this->set_timeout("final_response_timeout", 5000, [this]() {
           if (this->waiting_for_response_) {
-            ESP_LOGW(TAG, "No response received within 3 seconds, trying direct characteristic read");
-            // Try reading just the first response characteristic directly
-            this->read_response_characteristic(0);
+            ESP_LOGW(TAG, "No response received at all, giving up");
+            this->waiting_for_response_ = false;
           }
         });
       } else {
@@ -1946,23 +1969,35 @@ void EnergomeraBleComponent::read_response_characteristic(int char_index) {
   }
   
   // For now, use calculated handles based on the pattern we observed
-  // RX0 (b91b0101) = 0x001e, so b91b0106 should be around 0x002e + offset
-  // This is a simplified approach - ideally we should discover these handles
-  uint16_t base_handle = 0x0025;  // Starting handle for response characteristics
+  // RX0 (b91b0101) = 0x001e, TX (b91b0105) = 0x0021, RX1 (b91b0106) = 0x0025
+  // This is a simplified approach - we should discover these handles
+  uint16_t base_handle = 0x0025;  // Starting handle for response characteristics (RX1)
   uint16_t char_handle = base_handle + (char_index * 3);  // Each char takes ~3 handles
   
-  ESP_LOGD(TAG, "Reading response characteristic %d (handle 0x%04x)", char_index, char_handle);
+  ESP_LOGD(TAG, "Reading response characteristic %d (UUID: %s, calculated handle: 0x%04x)", 
+           char_index, RESPONSE_CHAR_UUIDS[char_index], char_handle);
   
-  esp_err_t status = esp_ble_gattc_read_char(
-    this->parent()->get_gattc_if(),
-    this->parent()->get_conn_id(),
-    char_handle,
-    ESP_GATT_AUTH_REQ_NONE
-  );
-  
-  if (status != ESP_OK) {
-    ESP_LOGW(TAG, "Failed to start reading characteristic %d, status=%d", char_index, status);
+  // Try a few different handle variations in case our calculation is wrong
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint16_t try_handle = char_handle + attempt;
+    ESP_LOGD(TAG, "Attempt %d: trying handle 0x%04x", attempt + 1, try_handle);
+    
+    esp_err_t status = esp_ble_gattc_read_char(
+      this->parent()->get_gattc_if(),
+      this->parent()->get_conn_id(),
+      try_handle,
+      ESP_GATT_AUTH_REQ_NONE
+    );
+    
+    if (status == ESP_OK) {
+      ESP_LOGD(TAG, "Read attempt successful on handle 0x%04x", try_handle);
+      return;  // Success, wait for response
+    } else {
+      ESP_LOGD(TAG, "Read attempt failed on handle 0x%04x, status=%d", try_handle, status);
+    }
   }
+  
+  ESP_LOGW(TAG, "All read attempts failed for characteristic %d", char_index);
 }
 
 void EnergomeraBleComponent::process_complete_response() {

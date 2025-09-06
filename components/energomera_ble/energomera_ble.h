@@ -339,6 +339,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   int packets_to_read_{0};        // Number of characteristics to read
   int current_char_index_{0};     // Current characteristic being read
   bool reading_version_{false};   // True when reading version characteristic
+  int notifications_registered_{0}; // Count of notification registrations
 
  private:
   static uint8_t next_obj_id_;
