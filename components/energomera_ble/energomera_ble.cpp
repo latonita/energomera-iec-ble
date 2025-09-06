@@ -1120,16 +1120,27 @@ void EnergomeraBleComponent::start_authentication() {
 
 void EnergomeraBleComponent::handle_response(uint8_t *data, size_t len) {
   ESP_LOGD(TAG, "Received response: length=%d", len);
-  ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, len, esp_log_level_t::ESP_LOG_DEBUG);
+  
+  ESP_LOGD(TAG, "RX: %s", format_frame_pretty(data, len).c_str());
 
-  // Check for CE208 authorization response (20-byte response confirms authentication)
-  if (!this->authenticated_ && this->waiting_for_auth_response_ && len == 20) {
-    ESP_LOGI(TAG, "CE208 authentication successful - received 20-byte authorization response");
+  // Check for CE208 authorization response (any response after auth+time sequence may indicate success)
+  if (!this->authenticated_ && this->waiting_for_auth_response_) {
+    if (len == 20) {
+      ESP_LOGI(TAG, "CE208 authentication successful - received expected 20-byte authorization response");
+    } else if (len > 0) {
+      ESP_LOGI(TAG, "CE208 authentication assumed successful - received %d-byte response after auth+time", len);
+    }
     this->authenticated_ = true;
     this->waiting_for_auth_response_ = false;
     this->cancel_timeout("auth_check");
     ESP_LOGI(TAG, "Ready for data communication");
-    return;
+    
+    // If it's not a 20-byte response, continue processing as it might be actual data
+    if (len != 20) {
+      // Continue processing this response as normal data
+    } else {
+      return;  // 20-byte responses are just auth confirmation
+    }
   }
 
   // Handle other responses
@@ -1253,8 +1264,63 @@ void EnergomeraBleComponent::send_auth_command() {
   // Trigger auth write using RSSI read callback mechanism
   esp_ble_gap_read_rssi(this->parent()->get_remote_bda());
   
-  // Schedule time sync command after a short delay
-  this->set_timeout("time_sync", 200, [this]() { this->send_time_sync(); });
+  // Immediately send time sync after auth (no delay, just like r4sGate.c)
+  this->send_time_sync_immediate();
+}
+
+void EnergomeraBleComponent::send_time_sync_immediate() {
+  ESP_LOGD(TAG, "Sending immediate time synchronization (r4sGate method)");
+  
+  if (!this->time_source_) {
+    ESP_LOGW(TAG, "No time source configured - time sync skipped");
+    return;
+  }
+  
+  auto time = this->time_source_->now();
+  if (!time.is_valid()) {
+    ESP_LOGW(TAG, "Time not synchronized - time sync skipped");
+    return;
+  }
+  
+  // Format time data exactly like r4sGate.c for CE208 (8 bytes)
+  struct tm timeinfo;
+  timeinfo.tm_year = time.year - 1900;  // tm_year is years since 1900
+  timeinfo.tm_mon = time.month - 1;     // tm_mon is 0-11
+  timeinfo.tm_mday = time.day_of_month;
+  timeinfo.tm_hour = time.hour;
+  timeinfo.tm_min = time.minute;
+  timeinfo.tm_sec = time.second;
+  timeinfo.tm_wday = time.day_of_week == 1 ? 0 : time.day_of_week - 1; // Convert ESPHome Sunday=1 to tm Sunday=0
+  
+  uint8_t time_data[8];
+  time_data[0] = timeinfo.tm_year / 100 + 19;  // Same formula as r4sGate.c
+  time_data[1] = timeinfo.tm_year % 100;
+  time_data[2] = timeinfo.tm_mon + 1;          // Convert back to 1-12
+  time_data[3] = timeinfo.tm_mday;
+  time_data[4] = timeinfo.tm_hour;
+  time_data[5] = timeinfo.tm_min;
+  time_data[6] = timeinfo.tm_sec;
+  time_data[7] = timeinfo.tm_wday;             // Sunday=0, Monday=1, etc.
+  
+  ESP_LOGD(TAG, "r4sGate time format: %02d%02d-%02d-%02d %02d:%02d:%02d wday=%d", 
+    time_data[0], time_data[1], time_data[2], time_data[3],
+    time_data[4], time_data[5], time_data[6], time_data[7]);
+  
+  // Step 2: Send time sync command to time handle (3) - exactly like r4sGate.c
+  memcpy(this->send_data_, time_data, 8);
+  this->send_data_len_ = 8;
+  this->send_data_handle_ = 3;  // time handle
+  
+  // Trigger time write using RSSI read callback mechanism (immediate, no delay)
+  esp_ble_gap_read_rssi(this->parent()->get_remote_bda());
+  
+  // Set timeout to wait for 20-byte authorization response
+  this->set_timeout("auth_check", 2000, [this]() {
+    if (!this->authenticated_) {
+      ESP_LOGW(TAG, "Authentication timeout - no 20-byte response received");
+      this->mark_failed();
+    }
+  });
 }
 
 void EnergomeraBleComponent::send_time_sync() {
@@ -1313,6 +1379,10 @@ void EnergomeraBleComponent::send_time_sync() {
 }
 
 void EnergomeraBleComponent::receive_data(uint8_t *data, size_t length) {
+  ESP_LOGD(TAG, "Received data length: %d", length);
+  
+  ESP_LOGD(TAG, "RD: %s", format_frame_pretty(data, length).c_str());
+
   if (this->buffers_.amount_in + length >= MAX_IN_BUF_SIZE) {
     ESP_LOGE(TAG, "RX buffer overflow, clearing RX buffer");
     this->buffers_.amount_in = 0;

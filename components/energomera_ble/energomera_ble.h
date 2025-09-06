@@ -132,6 +132,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void start_authentication();
   void send_auth_command();
   void send_time_sync();
+  void send_time_sync_immediate();
   void send_command(uint8_t cmd, uint8_t *data, size_t data_len);
   void handle_response(uint8_t *data, size_t len);
   uint8_t last_command_;
