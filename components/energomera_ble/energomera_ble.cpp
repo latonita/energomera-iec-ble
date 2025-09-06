@@ -862,6 +862,11 @@ void EnergomeraBleComponent::setup_characteristics() {
 }
 
 void EnergomeraBleComponent::read_version_characteristic() {
+  if (this->reading_version_) {
+    ESP_LOGD(TAG, "Version read already in progress, skipping");
+    return;
+  }
+  
   ESP_LOGI(TAG, "📖 Following BLE Implementation Guide: Reading version characteristic (b91b0101) first");
   
   this->reading_version_ = true;  // Mark that we're reading version
@@ -925,8 +930,8 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         this->notifications_registered_++;
         ESP_LOGI(TAG, "Registered for notifications (%d/2)", this->notifications_registered_);
         
-        // Wait for both TX and RX0 notifications to be registered
-        if (this->notifications_registered_ >= 2) {
+        // Only proceed once when we have both registrations
+        if (this->notifications_registered_ == 2 && !this->ready_to_communicate_) {
           this->authenticated_ = false;
           this->ready_to_communicate_ = true;
           
@@ -1033,11 +1038,18 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
           return;
         }
         
-        // Handle response characteristic reads
+        // Handle response characteristic reads  
         ESP_LOGD(TAG, "Read characteristic %d: length=%d", this->current_char_index_, param->read.value_len);
         ESP_LOG_BUFFER_HEX(TAG, param->read.value, param->read.value_len);
         
-        // Accumulate response data
+        // For authentication responses, process immediately without waiting for more characteristics
+        if (!this->authenticated_ && this->waiting_for_auth_response_) {
+          ESP_LOGD(TAG, "Processing authentication response from characteristic read");
+          this->handle_response(param->read.value, param->read.value_len);
+          return;
+        }
+        
+        // Accumulate response data for multi-characteristic responses
         if (this->response_length_ + param->read.value_len < sizeof(this->response_buffer_)) {
           memcpy(&this->response_buffer_[this->response_length_], param->read.value, param->read.value_len);
           this->response_length_ += param->read.value_len;
