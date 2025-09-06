@@ -131,12 +131,19 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
 
   void start_authentication();
   void send_auth_command();
+  void send_full_handshake();
   void send_params_request();
   void send_time_sync();
   void send_time_sync_immediate();
   void send_command(uint8_t cmd, uint8_t *data, size_t data_len);
   void handle_response(uint8_t *data, size_t len);
   bool send_command_chunked(const uint8_t *data, size_t length, uint16_t handle);
+  
+  // BLE-specific helper methods
+  uint8_t add_parity(uint8_t byte);
+  void apply_parity_to_command(uint8_t *data, size_t length);
+  bool send_iec61107_command(const char* command);
+  bool send_command_with_ble_fragmentation(const uint8_t *data, size_t length);
   uint8_t last_command_;
   uint32_t response_timeout_{0};
 

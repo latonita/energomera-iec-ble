@@ -1224,6 +1224,33 @@ void EnergomeraBleComponent::handle_response(uint8_t *data, size_t len) {
   }
 }
 
+void EnergomeraBleComponent::send_full_handshake() {
+  ESP_LOGD(TAG, "Sending full IEC 61107 handshake command (ASK_EMD_WATCH)");
+  
+  // IEC 61107 command from Android app: /?!R1GRPNM(WATCH()ID_FW()PROFI()EMD01(0.0,FF))
+  // This should be sent as text, not binary array
+  const char* full_handshake = "/?!R1\x02GRPNM(WATCH()ID_FW()PROFI()EMD01(0.0,FF))\x03";
+  
+  this->waiting_for_auth_response_ = true;
+  
+  // Use proper BLE command sending with parity encoding
+  bool success = this->send_iec61107_command(full_handshake);
+  
+  if (success) {
+    ESP_LOGD(TAG, "Full IEC 61107 handshake sent successfully");
+    // Set timeout for response
+    this->set_timeout("auth_check", 5000, [this]() {
+      if (!this->authenticated_) {
+        ESP_LOGW(TAG, "Full IEC 61107 handshake timeout - no response received");
+        this->mark_failed();
+      }
+    });
+  } else {
+    ESP_LOGW(TAG, "Failed to send full IEC 61107 handshake");
+    this->mark_failed();
+  }
+}
+
 void EnergomeraBleComponent::send_params_request() {
   if (!this->authenticated_) {
     ESP_LOGW(TAG, "Not authenticated, cannot send params request");
@@ -1301,13 +1328,179 @@ void EnergomeraBleComponent::send_command(uint8_t cmd, uint8_t *data, size_t dat
   }
 }
 
+// Add parity bit to a byte (BLE-specific requirement)
+uint8_t EnergomeraBleComponent::add_parity(uint8_t byte) {
+  int parity_count = 0;
+  
+  // Count set bits in lower 7 bits
+  for (int bit_pos = 0; bit_pos < 7; bit_pos++) {
+    parity_count += (byte >> bit_pos) & 1;
+  }
+  
+  // Set MSB based on even parity
+  uint8_t result = byte | 0x80; // Set MSB
+  
+  // Clear MSB if parity count is odd (to make total even)
+  if ((parity_count & 1) == 1) {
+    result = result & 0x7F; // Clear MSB
+  }
+  
+  return result;
+}
+
+// Apply parity encoding to all bytes in a command
+void EnergomeraBleComponent::apply_parity_to_command(uint8_t *data, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    data[i] = this->add_parity(data[i]);
+  }
+}
+
+// Send IEC 61107 command with proper BLE formatting
+bool EnergomeraBleComponent::send_iec61107_command(const char* command) {
+  if (!command) {
+    ESP_LOGW(TAG, "Cannot send null command");
+    return false;
+  }
+  
+  size_t cmd_len = strlen(command);
+  if (cmd_len == 0) {
+    ESP_LOGW(TAG, "Cannot send empty command");
+    return false;
+  }
+  
+  // Convert command to bytes and apply parity encoding
+  uint8_t *cmd_bytes = new uint8_t[cmd_len];
+  memcpy(cmd_bytes, command, cmd_len);
+  
+  ESP_LOGD(TAG, "Original IEC 61107 command: %s", command);
+  ESP_LOG_BUFFER_HEX(TAG, cmd_bytes, cmd_len);
+  
+  // Apply parity encoding (BLE requirement)
+  this->apply_parity_to_command(cmd_bytes, cmd_len);
+  
+  ESP_LOGD(TAG, "With parity encoding:");
+  ESP_LOG_BUFFER_HEX(TAG, cmd_bytes, cmd_len);
+  
+  // Send with proper BLE fragmentation
+  bool success = this->send_command_with_ble_fragmentation(cmd_bytes, cmd_len);
+  
+  delete[] cmd_bytes;
+  return success;
+}
+
+bool EnergomeraBleComponent::send_command_with_ble_fragmentation(const uint8_t *data, size_t length) {
+  if (length == 0) {
+    ESP_LOGW(TAG, "Cannot send empty command");
+    return false;
+  }
+
+  // Calculate usable MTU (reserve bytes for BLE overhead)
+  size_t mtu_payload = (this->current_mtu_ > 4) ? (this->current_mtu_ - 4) : 19;
+  
+  if (length <= mtu_payload) {
+    // Single packet - use 0x80 (last packet) or 0xC0 (large MTU single packet)
+    uint8_t header = (this->current_mtu_ > 23) ? 0xC0 : 0x80;
+    
+    uint8_t *packet = new uint8_t[length + 1];
+    packet[0] = header;
+    memcpy(packet + 1, data, length);
+    
+    ESP_LOGD(TAG, "Sending single BLE packet (header=0x%02X, length=%zu)", header, length);
+    ESP_LOG_BUFFER_HEX(TAG, packet, length + 1);
+    
+    esp_err_t status = esp_ble_gattc_write_char(
+      this->parent()->get_gattc_if(),
+      this->parent()->get_conn_id(),
+      this->tx_handle_,
+      length + 1,
+      packet,
+      ESP_GATT_WRITE_TYPE_NO_RSP,  // Write without response (type 2)
+      ESP_GATT_AUTH_REQ_NONE
+    );
+    
+    delete[] packet;
+    
+    if (status == ESP_OK) {
+      ESP_LOGD(TAG, "Single packet sent successfully");
+      return true;
+    } else {
+      ESP_LOGW(TAG, "Failed to send single packet, status=%d", status);
+      return false;
+    }
+  }
+
+  // Multi-packet fragmentation
+  ESP_LOGD(TAG, "Fragmenting command: total=%zu bytes, mtu_payload=%zu", length, mtu_payload);
+  
+  size_t offset = 0;
+  bool first_packet = true;
+  bool all_sent = true;
+  
+  while (offset < length && all_sent) {
+    size_t remaining = length - offset;
+    size_t fragment_size = std::min(mtu_payload, remaining);
+    bool last_packet = (offset + fragment_size >= length);
+    
+    uint8_t header;
+    if (first_packet && last_packet) {
+      header = 0x80; // Single packet (shouldn't happen in this branch)
+    } else if (first_packet) {
+      header = 0x00; // First packet
+    } else if (last_packet) {
+      header = 0x80; // Last packet
+    } else {
+      header = 0x00; // Middle packet (no specific flag)
+    }
+    
+    uint8_t *packet = new uint8_t[fragment_size + 1];
+    packet[0] = header;
+    memcpy(packet + 1, data + offset, fragment_size);
+    
+    ESP_LOGD(TAG, "Sending fragment: offset=%zu, size=%zu, header=0x%02X, %s", 
+             offset, fragment_size, header,
+             first_packet ? "FIRST" : (last_packet ? "LAST" : "MIDDLE"));
+    
+    esp_err_t status = esp_ble_gattc_write_char(
+      this->parent()->get_gattc_if(),
+      this->parent()->get_conn_id(),
+      this->tx_handle_,
+      fragment_size + 1,
+      packet,
+      ESP_GATT_WRITE_TYPE_NO_RSP,  // Write without response
+      ESP_GATT_AUTH_REQ_NONE
+    );
+    
+    delete[] packet;
+    
+    if (status != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to send fragment at offset %zu, status=%d", offset, status);
+      all_sent = false;
+      break;
+    }
+    
+    offset += fragment_size;
+    first_packet = false;
+    
+    // Small delay between fragments to avoid overwhelming the device
+    delay(50);
+  }
+  
+  if (all_sent) {
+    ESP_LOGD(TAG, "All command fragments sent successfully");
+  } else {
+    ESP_LOGW(TAG, "Failed to send complete fragmented command");
+  }
+  
+  return all_sent;
+}
+
 bool EnergomeraBleComponent::send_command_chunked(const uint8_t *data, size_t length, uint16_t handle) {
   if (length == 0) {
     ESP_LOGW(TAG, "Cannot send empty command");
     return false;
   }
 
-  // Check if we can send in one packet (like Android app with 240 byte MTU)
+  // Check if we can send in one packet
   // Leave 3 bytes for BLE/GATT headers
   size_t usable_mtu = (this->current_mtu_ > 3) ? (this->current_mtu_ - 3) : 20;
   
@@ -1334,60 +1527,52 @@ bool EnergomeraBleComponent::send_command_chunked(const uint8_t *data, size_t le
     }
   }
 
-  // Need fragmentation - use Android app style with flags
-  // Fragment format: [flags][fragment_data]
-  // flags: bit 0 = first fragment, bit 1 = last fragment
-  const size_t fragment_size = usable_mtu - 1;  // Reserve 1 byte for flags
-  const size_t total_fragments = (length + fragment_size - 1) / fragment_size;
-  bool all_sent = true;
+  // Command is too large and MTU negotiation failed
+  // Try sending without fragmentation using write without response
+  ESP_LOGW(TAG, "Command too large (%zu bytes) for MTU (%d), trying write without response", length, this->current_mtu_);
   
-  ESP_LOGD(TAG, "Fragmenting command: total=%zu bytes, fragment_size=%zu, fragments=%zu", 
-           length, fragment_size, total_fragments);
+  esp_err_t status = esp_ble_gattc_write_char(
+    this->parent()->get_gattc_if(),
+    this->parent()->get_conn_id(), 
+    handle,
+    length,
+    const_cast<uint8_t*>(data),
+    ESP_GATT_WRITE_TYPE_NO_RSP,  // Write without response - might have higher limit
+    ESP_GATT_AUTH_REQ_NONE
+  );
   
-  for (size_t i = 0; i < total_fragments && all_sent; i++) {
-    size_t offset = i * fragment_size;
-    size_t current_fragment_size = std::min(fragment_size, length - offset);
+  if (status == ESP_OK) {
+    ESP_LOGD(TAG, "Command sent successfully without response");
+    return true;
+  }
+  
+  ESP_LOGW(TAG, "Failed to send command without response, status=%d", status);
+  
+  // As last resort, try a shorter initial command
+  if (length > 20) {
+    ESP_LOGW(TAG, "Trying shortened handshake command");
+    // Try a minimal IEC 61107 request: "/?!\r\n" 
+    uint8_t short_cmd[] = {0x2F, 0x3F, 0x21, 0x0D, 0x0A};  // /?! + CR LF
     
-    // Prepare fragment with flags
-    uint8_t fragment_packet[usable_mtu];
-    uint8_t flags = 0;
-    
-    if (i == 0) flags |= 0x01;  // First fragment
-    if (i == total_fragments - 1) flags |= 0x02;  // Last fragment
-    
-    fragment_packet[0] = flags;
-    memcpy(fragment_packet + 1, data + offset, current_fragment_size);
-    
-    ESP_LOGD(TAG, "Sending fragment %zu/%zu: flags=0x%02x, offset=%zu, size=%zu", 
-             i + 1, total_fragments, flags, offset, current_fragment_size);
-    
-    esp_err_t status = esp_ble_gattc_write_char(
+    status = esp_ble_gattc_write_char(
       this->parent()->get_gattc_if(),
       this->parent()->get_conn_id(), 
       handle,
-      current_fragment_size + 1,  // +1 for flags byte
-      fragment_packet,
+      sizeof(short_cmd),
+      short_cmd,
       ESP_GATT_WRITE_TYPE_RSP,
       ESP_GATT_AUTH_REQ_NONE
     );
     
-    if (status != ESP_OK) {
-      ESP_LOGW(TAG, "Failed to send fragment %zu, status=%d", i + 1, status);
-      all_sent = false;
-      break;
+    if (status == ESP_OK) {
+      ESP_LOGD(TAG, "Short handshake command sent successfully");
+      return true;
+    } else {
+      ESP_LOGW(TAG, "Failed to send short handshake, status=%d", status);
     }
-    
-    // Small delay between fragments
-    delay(50);
   }
   
-  if (all_sent) {
-    ESP_LOGD(TAG, "All command fragments sent successfully");
-  } else {
-    ESP_LOGW(TAG, "Failed to send complete fragmented command");
-  }
-  
-  return all_sent;
+  return false;
 }
 
 void EnergomeraBleComponent::send_auth_command() {
@@ -1405,43 +1590,30 @@ void EnergomeraBleComponent::send_auth_command() {
     this->mark_failed();
     return;
   }
+
+  // Send proper IEC 61107 text command as shown in the Android app
+  ESP_LOGD(TAG, "Sending IEC 61107 identification request");
   
-  ESP_LOGD(TAG, "Sending IEC 61107 handshake command (ASK_EMD_WATCH)");
-  
-  // IEC 61107 command from Android app: /?!R1GRPNM(WATCH()ID_FW()PROFI()EMD01(0.0,FF))
-  // This requests initial device info and serves as authentication handshake
-  uint8_t handshake_cmd[] = {
-    47, 63, 33, 1, 82, 49, 2, 71, 82, 80, 78, 77, 40, 87, 65, 84, 67, 72, 40, 41, 
-    73, 68, 95, 70, 87, 40, 41, 80, 82, 79, 70, 73, 40, 41, 69, 77, 68, 48, 49, 40, 
-    48, 46, 48, 44, 70, 70, 41, 41, 3, 0
-  };
-  
-  // Calculate and set checksum (last byte)
-  uint8_t checksum = 0;
-  for (int i = 4; i < sizeof(handshake_cmd) - 5; i++) {
-    checksum += handshake_cmd[i];
-  }
-  handshake_cmd[sizeof(handshake_cmd) - 1] = checksum & 0x7F;
-  
-  ESP_LOGD(TAG, "Sending IEC 61107 handshake:");
-  ESP_LOG_BUFFER_HEX(TAG, handshake_cmd, sizeof(handshake_cmd));
+  // Standard IEC 61107 identification request
+  const char* iec_command = "/?!\r\n";
   
   this->waiting_for_auth_response_ = true;
   
-  // Send using chunked approach to handle BLE MTU limitations
-  bool success = this->send_command_chunked(handshake_cmd, sizeof(handshake_cmd), this->tx_handle_);
+  // Use proper BLE command sending with parity encoding
+  bool success = this->send_iec61107_command(iec_command);
   
   if (success) {
-    ESP_LOGD(TAG, "IEC 61107 handshake sent successfully");
+    ESP_LOGD(TAG, "IEC 61107 identification request sent successfully");
     // Set timeout for response
     this->set_timeout("auth_check", 5000, [this]() {
       if (!this->authenticated_) {
-        ESP_LOGW(TAG, "IEC 61107 handshake timeout - no response received");
-        this->mark_failed();
+        ESP_LOGW(TAG, "IEC 61107 identification timeout - trying full handshake");
+        // Try the full handshake command from Android app
+        this->send_full_handshake();
       }
     });
   } else {
-    ESP_LOGW(TAG, "Failed to send IEC 61107 handshake");
+    ESP_LOGW(TAG, "Failed to send IEC 61107 identification request");
     this->mark_failed();
   }
 }
