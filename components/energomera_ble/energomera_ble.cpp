@@ -918,21 +918,46 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
     }
 
     case ESP_GATTC_NOTIFY_EVT: {
-      // According to BLE guide: TX characteristic notifies with number of packets to read
-      if (param->notify.handle == this->tx_handle_ && param->notify.value_len > 0) {
-        int packets_to_read = param->notify.value[0];
-        ESP_LOGD(TAG, "Received notification: %d packets to read from response characteristics", packets_to_read);
+      ESP_LOGD(TAG, "Received notification from handle 0x%04x, length=%d", 
+               param->notify.handle, param->notify.value_len);
+      ESP_LOG_BUFFER_HEX(TAG, param->notify.value, param->notify.value_len);
+      
+      // Check if this is a response notification from RX0 (where we registered)
+      if (param->notify.handle == this->rx0_handle_) {
+        ESP_LOGD(TAG, "Response notification from RX0 characteristic");
         
-        if (packets_to_read > 0 && packets_to_read <= 15) {
-          this->start_response_reading(packets_to_read);
+        // Check if this is a packet count notification or actual response data
+        if (param->notify.value_len == 1) {
+          // Single byte might be packet count
+          int packets_to_read = param->notify.value[0];
+          ESP_LOGD(TAG, "Packet count notification: %d packets to read", packets_to_read);
+          
+          if (packets_to_read > 0 && packets_to_read <= 15) {
+            this->start_response_reading(packets_to_read);
+          } else {
+            ESP_LOGD(TAG, "Treating single byte as response data, not packet count");
+            this->handle_response(param->notify.value, param->notify.value_len);
+          }
         } else {
-          ESP_LOGW(TAG, "Invalid packet count in notification: %d", packets_to_read);
+          // Multi-byte response data
+          ESP_LOGD(TAG, "Multi-byte response data received via notification");
+          this->handle_response(param->notify.value, param->notify.value_len);
+        }
+      } else if (param->notify.handle == this->tx_handle_) {
+        // TX characteristic notification (as per BLE guide)
+        if (param->notify.value_len > 0) {
+          int packets_to_read = param->notify.value[0];
+          ESP_LOGD(TAG, "TX characteristic notification: %d packets to read from response characteristics", packets_to_read);
+          
+          if (packets_to_read > 0 && packets_to_read <= 15) {
+            this->start_response_reading(packets_to_read);
+          } else {
+            ESP_LOGW(TAG, "Invalid packet count in TX notification: %d", packets_to_read);
+          }
         }
       } else {
-        // Handle other notifications (might be from RX characteristics)
-        ESP_LOGD(TAG, "Received notification from handle 0x%04x, length=%d", 
-                 param->notify.handle, param->notify.value_len);
-        ESP_LOG_BUFFER_HEX(TAG, param->notify.value, param->notify.value_len);
+        // Handle other notifications (might be from other RX characteristics)
+        ESP_LOGD(TAG, "Notification from unknown handle, treating as response data");
         this->handle_response(param->notify.value, param->notify.value_len);
       }
       break;
@@ -943,6 +968,23 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         ESP_LOGD(TAG, "Command sent successfully");
         this->waiting_for_response_ = true;
         this->response_timeout_ = millis() + 2000;
+        
+        // According to BLE guide: After sending command, start reading response characteristics
+        // Give the meter a moment to process, then start reading
+        this->set_timeout("start_response_read", 100, [this]() {
+          ESP_LOGD(TAG, "Starting response read from characteristics after command");
+          // Start reading from the first response characteristic (RX1 = b91b0106)
+          this->start_response_reading(5);  // Try reading from first 5 characteristics
+        });
+        
+        // Also set a fallback timeout in case no response comes
+        this->set_timeout("response_timeout", 3000, [this]() {
+          if (this->waiting_for_response_) {
+            ESP_LOGW(TAG, "No response received within 3 seconds, trying direct characteristic read");
+            // Try reading just the first response characteristic directly
+            this->read_response_characteristic(0);
+          }
+        });
       } else {
         ESP_LOGW(TAG, "Failed to send command, status=%d", param->write.status);
         this->waiting_for_response_ = false;
@@ -1244,6 +1286,10 @@ void EnergomeraBleComponent::start_authentication() {
 
 void EnergomeraBleComponent::handle_response(uint8_t *data, size_t len) {
   ESP_LOGD(TAG, "Received response: length=%d", len);
+  
+  // Clear waiting flag since we received a response
+  this->waiting_for_response_ = false;
+  this->cancel_timeout("response_timeout");
   
   ESP_LOGD(TAG, "RX: %s", format_frame_pretty(data, len).c_str());
 
@@ -1922,6 +1968,12 @@ void EnergomeraBleComponent::read_response_characteristic(int char_index) {
 void EnergomeraBleComponent::process_complete_response() {
   ESP_LOGI(TAG, "Complete response received: %d bytes total", this->response_length_);
   ESP_LOG_BUFFER_HEX(TAG, this->response_buffer_, this->response_length_);
+  
+  // Clear waiting flag since we got a response
+  this->waiting_for_response_ = false;
+  
+  // Cancel any pending timeout
+  this->cancel_timeout("response_timeout");
   
   // Process the complete response using existing handler
   this->handle_response(this->response_buffer_, this->response_length_);
