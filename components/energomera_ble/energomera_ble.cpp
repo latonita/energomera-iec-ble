@@ -17,6 +17,7 @@
 #include "energomera_ble.h"
 #include <sstream>
 #include <algorithm>
+#include <cstring>
 
 namespace esphome {
 namespace energomera_ble {
@@ -851,6 +852,16 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       if (param->open.status == ESP_GATT_OK) {
         ESP_LOGI(TAG, "Connected to CE208 meter");
         this->node_state = espbt::ClientState::ESTABLISHED;
+        
+        // Request larger MTU like Android app (240 bytes)
+        esp_ble_gatt_set_local_mtu(244);  // 240 + 4 bytes for headers
+        esp_err_t mtu_ret = esp_ble_gattc_send_mtu_req(gattc_if, param->open.conn_id);
+        if (mtu_ret) {
+          ESP_LOGW(TAG, "MTU negotiation request failed, error=%x, continuing with default MTU", mtu_ret);
+          this->mtu_negotiated_ = true;  // Mark as done even if failed
+        } else {
+          ESP_LOGI(TAG, "Requesting MTU negotiation to 240 bytes");
+        }
       } else {
         ESP_LOGW(TAG, "Connection failed, status=%d", param->open.status);
         this->node_state = espbt::ClientState::IDLE;
@@ -862,6 +873,14 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       // ESPHome automatically discovers services and characteristics
       // We need to find our characteristics after discovery is complete
       this->setup_characteristics();
+      break;
+    }
+
+    case ESP_GATTC_CFG_MTU_EVT: {
+      this->current_mtu_ = param->cfg_mtu.mtu;
+      this->mtu_negotiated_ = true;
+      ESP_LOGI(TAG, "MTU negotiation complete, status=%d, MTU=%d", 
+               param->cfg_mtu.status, this->current_mtu_);
       break;
     }
 
@@ -1118,9 +1137,20 @@ void EnergomeraBleComponent::start_authentication() {
   if (!this->ready_to_communicate_)
     return;
 
-  ESP_LOGI(TAG, "Starting CE208 authentication sequence");
+  // Wait a bit for MTU negotiation if it hasn't completed yet
+  if (!this->mtu_negotiated_) {
+    ESP_LOGD(TAG, "Waiting for MTU negotiation to complete...");
+    this->set_timeout("wait_mtu", 1000, [this]() {
+      this->mtu_negotiated_ = true;  // Force completion after timeout
+      ESP_LOGD(TAG, "MTU negotiation timeout, proceeding with current MTU=%d", this->current_mtu_);
+      this->start_authentication();
+    });
+    return;
+  }
 
-  // Send authentication command - single 0xFF byte to auth handle
+  ESP_LOGI(TAG, "Starting CE208 authentication sequence (MTU=%d)", this->current_mtu_);
+
+  // Send authentication command - IEC 61107 handshake
   this->send_auth_command();
 }
 
@@ -1277,46 +1307,87 @@ bool EnergomeraBleComponent::send_command_chunked(const uint8_t *data, size_t le
     return false;
   }
 
-  // Send command in chunks due to BLE MTU limitations (23 bytes)
-  const size_t chunk_size = 20;  // Leave some margin for BLE headers
-  bool all_chunks_sent = true;
+  // Check if we can send in one packet (like Android app with 240 byte MTU)
+  // Leave 3 bytes for BLE/GATT headers
+  size_t usable_mtu = (this->current_mtu_ > 3) ? (this->current_mtu_ - 3) : 20;
   
-  ESP_LOGD(TAG, "Sending command in chunks (total=%zu bytes, chunk_size=%zu)", length, chunk_size);
-  
-  for (size_t offset = 0; offset < length && all_chunks_sent; offset += chunk_size) {
-    size_t current_chunk_size = std::min(chunk_size, length - offset);
-    
-    ESP_LOGD(TAG, "Sending chunk %zu/%zu: offset=%zu, size=%zu", 
-             (offset / chunk_size) + 1, (length + chunk_size - 1) / chunk_size, 
-             offset, current_chunk_size);
+  if (length <= usable_mtu) {
+    // Send as single packet
+    ESP_LOGD(TAG, "Sending command in single packet (length=%zu, MTU=%d)", length, this->current_mtu_);
     
     esp_err_t status = esp_ble_gattc_write_char(
       this->parent()->get_gattc_if(),
       this->parent()->get_conn_id(), 
       handle,
-      current_chunk_size,
-      const_cast<uint8_t*>(data + offset),
+      length,
+      const_cast<uint8_t*>(data),
       ESP_GATT_WRITE_TYPE_RSP,  // Write with response
       ESP_GATT_AUTH_REQ_NONE
     );
     
+    if (status == ESP_OK) {
+      ESP_LOGD(TAG, "Command sent successfully in single packet");
+      return true;
+    } else {
+      ESP_LOGW(TAG, "Failed to send single packet, status=%d", status);
+      return false;
+    }
+  }
+
+  // Need fragmentation - use Android app style with flags
+  // Fragment format: [flags][fragment_data]
+  // flags: bit 0 = first fragment, bit 1 = last fragment
+  const size_t fragment_size = usable_mtu - 1;  // Reserve 1 byte for flags
+  const size_t total_fragments = (length + fragment_size - 1) / fragment_size;
+  bool all_sent = true;
+  
+  ESP_LOGD(TAG, "Fragmenting command: total=%zu bytes, fragment_size=%zu, fragments=%zu", 
+           length, fragment_size, total_fragments);
+  
+  for (size_t i = 0; i < total_fragments && all_sent; i++) {
+    size_t offset = i * fragment_size;
+    size_t current_fragment_size = std::min(fragment_size, length - offset);
+    
+    // Prepare fragment with flags
+    uint8_t fragment_packet[usable_mtu];
+    uint8_t flags = 0;
+    
+    if (i == 0) flags |= 0x01;  // First fragment
+    if (i == total_fragments - 1) flags |= 0x02;  // Last fragment
+    
+    fragment_packet[0] = flags;
+    memcpy(fragment_packet + 1, data + offset, current_fragment_size);
+    
+    ESP_LOGD(TAG, "Sending fragment %zu/%zu: flags=0x%02x, offset=%zu, size=%zu", 
+             i + 1, total_fragments, flags, offset, current_fragment_size);
+    
+    esp_err_t status = esp_ble_gattc_write_char(
+      this->parent()->get_gattc_if(),
+      this->parent()->get_conn_id(), 
+      handle,
+      current_fragment_size + 1,  // +1 for flags byte
+      fragment_packet,
+      ESP_GATT_WRITE_TYPE_RSP,
+      ESP_GATT_AUTH_REQ_NONE
+    );
+    
     if (status != ESP_OK) {
-      ESP_LOGW(TAG, "Failed to send chunk %zu, status=%d", (offset / chunk_size) + 1, status);
-      all_chunks_sent = false;
+      ESP_LOGW(TAG, "Failed to send fragment %zu, status=%d", i + 1, status);
+      all_sent = false;
       break;
     }
     
-    // Small delay between chunks to avoid overwhelming the device
+    // Small delay between fragments
     delay(50);
   }
   
-  if (all_chunks_sent) {
-    ESP_LOGD(TAG, "All command chunks sent successfully");
+  if (all_sent) {
+    ESP_LOGD(TAG, "All command fragments sent successfully");
   } else {
-    ESP_LOGW(TAG, "Failed to send complete command");
+    ESP_LOGW(TAG, "Failed to send complete fragmented command");
   }
   
-  return all_chunks_sent;
+  return all_sent;
 }
 
 void EnergomeraBleComponent::send_auth_command() {

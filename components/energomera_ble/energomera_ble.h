@@ -146,6 +146,10 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   uint16_t auth_handle_{0x001e}; // Auth characteristic handle (same as RX0)
   uint16_t time_handle_{0x0031}; // Time characteristic handle (RX4)
 
+  // MTU and fragmentation support
+  uint16_t current_mtu_{23};     // Current negotiated MTU (default BLE minimum)
+  bool mtu_negotiated_{false};   // Whether MTU negotiation completed
+
   void setup_characteristics();
 
   // UUID definitions
