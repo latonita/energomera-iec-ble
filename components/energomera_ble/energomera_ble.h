@@ -136,6 +136,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void send_time_sync_immediate();
   void send_command(uint8_t cmd, uint8_t *data, size_t data_len);
   void handle_response(uint8_t *data, size_t len);
+  bool send_command_chunked(const uint8_t *data, size_t length, uint16_t handle);
   uint8_t last_command_;
   uint32_t response_timeout_{0};
 

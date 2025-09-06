@@ -16,6 +16,7 @@
 #include "esphome/core/time.h"
 #include "energomera_ble.h"
 #include <sstream>
+#include <algorithm>
 
 namespace esphome {
 namespace energomera_ble {
@@ -1218,22 +1219,14 @@ void EnergomeraBleComponent::send_params_request() {
   ESP_LOGD(TAG, "Sending IEC 61107 params command:");
   ESP_LOG_BUFFER_HEX(TAG, params_cmd, sizeof(params_cmd));
   
-  // Send to TX characteristic
-  esp_err_t status = esp_ble_gattc_write_char(
-    this->parent()->get_gattc_if(),
-    this->parent()->get_conn_id(), 
-    this->tx_handle_,
-    sizeof(params_cmd),
-    params_cmd,
-    ESP_GATT_WRITE_TYPE_RSP,  // Write with response
-    ESP_GATT_AUTH_REQ_NONE
-  );
+  // Send using chunked approach to handle BLE MTU limitations
+  bool success = this->send_command_chunked(params_cmd, sizeof(params_cmd), this->tx_handle_);
   
-  if (status == ESP_OK) {
+  if (success) {
     ESP_LOGD(TAG, "IEC 61107 params request sent successfully");
     this->last_command_ = 3;  // ASK_PARAMS
   } else {
-    ESP_LOGW(TAG, "Failed to send IEC 61107 params request, status=%d", status);
+    ESP_LOGW(TAG, "Failed to send IEC 61107 params request");
   }
 }
 
@@ -1278,6 +1271,54 @@ void EnergomeraBleComponent::send_command(uint8_t cmd, uint8_t *data, size_t dat
   }
 }
 
+bool EnergomeraBleComponent::send_command_chunked(const uint8_t *data, size_t length, uint16_t handle) {
+  if (length == 0) {
+    ESP_LOGW(TAG, "Cannot send empty command");
+    return false;
+  }
+
+  // Send command in chunks due to BLE MTU limitations (23 bytes)
+  const size_t chunk_size = 20;  // Leave some margin for BLE headers
+  bool all_chunks_sent = true;
+  
+  ESP_LOGD(TAG, "Sending command in chunks (total=%zu bytes, chunk_size=%zu)", length, chunk_size);
+  
+  for (size_t offset = 0; offset < length && all_chunks_sent; offset += chunk_size) {
+    size_t current_chunk_size = std::min(chunk_size, length - offset);
+    
+    ESP_LOGD(TAG, "Sending chunk %zu/%zu: offset=%zu, size=%zu", 
+             (offset / chunk_size) + 1, (length + chunk_size - 1) / chunk_size, 
+             offset, current_chunk_size);
+    
+    esp_err_t status = esp_ble_gattc_write_char(
+      this->parent()->get_gattc_if(),
+      this->parent()->get_conn_id(), 
+      handle,
+      current_chunk_size,
+      const_cast<uint8_t*>(data + offset),
+      ESP_GATT_WRITE_TYPE_RSP,  // Write with response
+      ESP_GATT_AUTH_REQ_NONE
+    );
+    
+    if (status != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to send chunk %zu, status=%d", (offset / chunk_size) + 1, status);
+      all_chunks_sent = false;
+      break;
+    }
+    
+    // Small delay between chunks to avoid overwhelming the device
+    delay(50);
+  }
+  
+  if (all_chunks_sent) {
+    ESP_LOGD(TAG, "All command chunks sent successfully");
+  } else {
+    ESP_LOGW(TAG, "Failed to send complete command");
+  }
+  
+  return all_chunks_sent;
+}
+
 void EnergomeraBleComponent::send_auth_command() {
   ESP_LOGD(TAG, "Starting IEC 61107 authentication for CE208/CE308");
   
@@ -1316,18 +1357,10 @@ void EnergomeraBleComponent::send_auth_command() {
   
   this->waiting_for_auth_response_ = true;
   
-  // Send to TX characteristic using the correct BLE service
-  esp_err_t status = esp_ble_gattc_write_char(
-    this->parent()->get_gattc_if(),
-    this->parent()->get_conn_id(), 
-    this->tx_handle_,  // TX characteristic from Android app
-    sizeof(handshake_cmd),
-    handshake_cmd,
-    ESP_GATT_WRITE_TYPE_RSP,  // Write with response
-    ESP_GATT_AUTH_REQ_NONE
-  );
+  // Send using chunked approach to handle BLE MTU limitations
+  bool success = this->send_command_chunked(handshake_cmd, sizeof(handshake_cmd), this->tx_handle_);
   
-  if (status == ESP_OK) {
+  if (success) {
     ESP_LOGD(TAG, "IEC 61107 handshake sent successfully");
     // Set timeout for response
     this->set_timeout("auth_check", 5000, [this]() {
@@ -1337,7 +1370,7 @@ void EnergomeraBleComponent::send_auth_command() {
       }
     });
   } else {
-    ESP_LOGW(TAG, "Failed to send IEC 61107 handshake, status=%d", status);
+    ESP_LOGW(TAG, "Failed to send IEC 61107 handshake");
     this->mark_failed();
   }
 }
