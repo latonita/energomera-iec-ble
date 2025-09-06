@@ -3,6 +3,8 @@
 #include "esphome/core/component.h"
 #include "esphome/components/ble_client/ble_client.h"
 #include "esphome/components/sensor/sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
+#include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 
 #include <esp_gattc_api.h>
@@ -141,9 +143,15 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   
   // BLE-specific helper methods
   uint8_t add_parity(uint8_t byte);
-  void apply_parity_to_command(uint8_t *data, size_t length);
+  void apply_parity_to_command(uint8_t *data, size_t data_len);
   bool send_iec61107_command(const char* command);
   bool send_command_with_ble_fragmentation(const uint8_t *data, size_t length);
+  
+  // Multi-characteristic response handling
+  void start_response_reading(int packets_to_read);
+  void read_response_characteristic(int char_index);
+  void process_complete_response();
+  
   uint8_t last_command_;
   uint32_t response_timeout_{0};
 
@@ -323,6 +331,12 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
     SensorMap::iterator request_iter{nullptr};  // talking to meter
     SensorMap::iterator sensor_iter{nullptr};   // publishing sensor values
   } loop_state_;
+
+  // Multi-characteristic response handling state
+  uint8_t response_buffer_[512];  // Buffer for accumulated response
+  int response_length_{0};        // Current response length
+  int packets_to_read_{0};        // Number of characteristics to read
+  int current_char_index_{0};     // Current characteristic being read
 
  private:
   static uint8_t next_obj_id_;

@@ -2,7 +2,7 @@ import re
 from esphome import pins
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import ble_client, binary_sensor, time
+from esphome.components import ble_client, binary_sensor, time, text_sensor
 from esphome.const import (
     CONF_ID,
     CONF_ADDRESS,
@@ -16,7 +16,7 @@ from esphome.const import (
 
 CODEOWNERS = ["@latonita"]
 
-AUTO_LOAD = ["binary_sensor"]
+AUTO_LOAD = ["binary_sensor", "text_sensor"]
 
 DEPENDENCIES = ["ble_client"]
 

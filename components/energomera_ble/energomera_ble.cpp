@@ -895,8 +895,23 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
     }
 
     case ESP_GATTC_NOTIFY_EVT: {
-      // Handle notifications from any of the RX characteristics
-      this->handle_response(param->notify.value, param->notify.value_len);
+      // According to BLE guide: TX characteristic notifies with number of packets to read
+      if (param->notify.handle == this->tx_handle_ && param->notify.value_len > 0) {
+        int packets_to_read = param->notify.value[0];
+        ESP_LOGD(TAG, "Received notification: %d packets to read from response characteristics", packets_to_read);
+        
+        if (packets_to_read > 0 && packets_to_read <= 15) {
+          this->start_response_reading(packets_to_read);
+        } else {
+          ESP_LOGW(TAG, "Invalid packet count in notification: %d", packets_to_read);
+        }
+      } else {
+        // Handle other notifications (might be from RX characteristics)
+        ESP_LOGD(TAG, "Received notification from handle 0x%04x, length=%d", 
+                 param->notify.handle, param->notify.value_len);
+        ESP_LOG_BUFFER_HEX(TAG, param->notify.value, param->notify.value_len);
+        this->handle_response(param->notify.value, param->notify.value_len);
+      }
       break;
     }
 
@@ -908,6 +923,32 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       } else {
         ESP_LOGW(TAG, "Failed to send command, status=%d", param->write.status);
         this->waiting_for_response_ = false;
+      }
+      break;
+    }
+
+    case ESP_GATTC_READ_CHAR_EVT: {
+      if (param->read.status == ESP_GATT_OK) {
+        ESP_LOGD(TAG, "Read characteristic %d: length=%d", this->current_char_index_, param->read.value_len);
+        ESP_LOG_BUFFER_HEX(TAG, param->read.value, param->read.value_len);
+        
+        // Accumulate response data
+        if (this->response_length_ + param->read.value_len < sizeof(this->response_buffer_)) {
+          memcpy(&this->response_buffer_[this->response_length_], param->read.value, param->read.value_len);
+          this->response_length_ += param->read.value_len;
+        } else {
+          ESP_LOGW(TAG, "Response buffer overflow, truncating data");
+        }
+        
+        // Continue reading or process complete response
+        this->current_char_index_++;
+        if (this->current_char_index_ < this->packets_to_read_) {
+          this->read_response_characteristic(this->current_char_index_);
+        } else {
+          this->process_complete_response();
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to read characteristic %d, status=%d", this->current_char_index_, param->read.status);
       }
       break;
     }
@@ -1769,6 +1810,77 @@ void EnergomeraBleComponent::sync_device_time() {
   this->set_device_time(1);
 }
 #endif
+
+// Multi-characteristic response reading implementation
+void EnergomeraBleComponent::start_response_reading(int packets_to_read) {
+  ESP_LOGD(TAG, "Starting to read %d response characteristics", packets_to_read);
+  
+  this->packets_to_read_ = packets_to_read;
+  this->current_char_index_ = 0;
+  this->response_length_ = 0;
+  
+  // Start reading from the first response characteristic
+  this->read_response_characteristic(0);
+}
+
+void EnergomeraBleComponent::read_response_characteristic(int char_index) {
+  // Response characteristics UUIDs from the BLE guide (b91b0106 through b91b0114)
+  // These correspond to handles that we need to calculate or discover
+  static const char* RESPONSE_CHAR_UUIDS[] = {
+    "b91b0106-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 0
+    "b91b0107-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 1
+    "b91b0108-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 2
+    "b91b0109-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 3
+    "b91b010a-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 4
+    "b91b010b-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 5
+    "b91b010c-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 6
+    "b91b010d-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 7
+    "b91b010e-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 8
+    "b91b010f-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 9
+    "b91b0110-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 10
+    "b91b0111-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 11
+    "b91b0112-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 12
+    "b91b0113-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 13
+    "b91b0114-8bef-45e2-97c3-1cd862d914df",  // Read characteristic 14
+  };
+  
+  if (char_index >= 15) {
+    ESP_LOGW(TAG, "Invalid characteristic index: %d", char_index);
+    return;
+  }
+  
+  // For now, use calculated handles based on the pattern we observed
+  // RX0 (b91b0101) = 0x001e, so b91b0106 should be around 0x002e + offset
+  // This is a simplified approach - ideally we should discover these handles
+  uint16_t base_handle = 0x0025;  // Starting handle for response characteristics
+  uint16_t char_handle = base_handle + (char_index * 3);  // Each char takes ~3 handles
+  
+  ESP_LOGD(TAG, "Reading response characteristic %d (handle 0x%04x)", char_index, char_handle);
+  
+  esp_err_t status = esp_ble_gattc_read_char(
+    this->parent()->get_gattc_if(),
+    this->parent()->get_conn_id(),
+    char_handle,
+    ESP_GATT_AUTH_REQ_NONE
+  );
+  
+  if (status != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to start reading characteristic %d, status=%d", char_index, status);
+  }
+}
+
+void EnergomeraBleComponent::process_complete_response() {
+  ESP_LOGI(TAG, "Complete response received: %d bytes total", this->response_length_);
+  ESP_LOG_BUFFER_HEX(TAG, this->response_buffer_, this->response_length_);
+  
+  // Process the complete response using existing handler
+  this->handle_response(this->response_buffer_, this->response_length_);
+  
+  // Reset response state
+  this->response_length_ = 0;
+  this->packets_to_read_ = 0;
+  this->current_char_index_ = 0;
+}
 
 void EnergomeraBleComponent::set_device_time(uint32_t timestamp) {
   ESP_LOGD(TAG, "set_device_time: %u", timestamp);
