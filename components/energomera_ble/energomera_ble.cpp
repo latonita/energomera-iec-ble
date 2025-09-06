@@ -972,15 +972,23 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         }
       } else if (param->notify.handle == this->tx_handle_) {
         // TX characteristic notification (as per BLE guide)
-        if (param->notify.value_len > 0) {
+        ESP_LOGD(TAG, "TX characteristic notification received: %d bytes", param->notify.value_len);
+        
+        if (param->notify.value_len == 1) {
+          // Single byte might be packet count
           int packets_to_read = param->notify.value[0];
-          ESP_LOGD(TAG, "TX characteristic notification: %d packets to read from response characteristics", packets_to_read);
+          ESP_LOGD(TAG, "Packet count notification: %d packets to read", packets_to_read);
           
           if (packets_to_read > 0 && packets_to_read <= 15) {
             this->start_response_reading(packets_to_read);
           } else {
-            ESP_LOGW(TAG, "Invalid packet count in TX notification: %d", packets_to_read);
+            ESP_LOGD(TAG, "Treating single byte as direct response data");
+            this->handle_response(param->notify.value, param->notify.value_len);
           }
+        } else {
+          // Multi-byte response data - handle directly
+          ESP_LOGD(TAG, "Multi-byte TX response data received via notification");
+          this->handle_response(param->notify.value, param->notify.value_len);
         }
       } else {
         // Handle other notifications (might be from other RX characteristics)
@@ -994,25 +1002,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       if (param->write.status == ESP_GATT_OK) {
         ESP_LOGD(TAG, "Command sent successfully");
         this->waiting_for_response_ = true;
-        this->response_timeout_ = millis() + 2000;
-        
-        // According to BLE guide: After sending command, wait for TX notification first
-        // Give the meter time to process and send notification
-        this->set_timeout("wait_tx_notification", 500, [this]() {
-          if (this->waiting_for_response_) {
-            ESP_LOGD(TAG, "No TX notification received, trying response characteristic reads");
-            // Try reading from response characteristics as fallback
-            this->start_response_reading(3);  // Try first 3 characteristics
-          }
-        });
-        
-        // Also set a final fallback timeout in case nothing works
-        this->set_timeout("final_response_timeout", 5000, [this]() {
-          if (this->waiting_for_response_) {
-            ESP_LOGW(TAG, "No response received at all, giving up");
-            this->waiting_for_response_ = false;
-          }
-        });
+        this->response_timeout_ = millis() + 5000;  // 5 second timeout for TX notification
       } else {
         ESP_LOGW(TAG, "Failed to send command, status=%d", param->write.status);
         this->waiting_for_response_ = false;
