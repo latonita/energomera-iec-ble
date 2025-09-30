@@ -126,11 +126,11 @@ void EnergomeraBleComponent::request_firmware_version_() {
   }
   esp_gattc_char_elem_t *char_elems = nullptr;
   uint16_t count = 0;
-  esp_gatt_status_t status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                                        this->service_start_handle_, this->service_end_handle_,
-                                                        nullptr, &count, 0);
+  esp_gatt_status_t status = esp_ble_gattc_get_attr_count(
+      this->parent_->get_gattc_if(), this->parent_->get_conn_id(), ESP_GATT_DB_CHARACTERISTIC, this->service_start_handle_,
+      this->service_end_handle_, ESP_GATT_INVALID_HANDLE, &count);
   if (status != ESP_GATT_OK) {
-    ESP_LOGW(TAG, "Failed to enumerate characteristics (status=%d, count=%u)", status, count);
+    ESP_LOGW(TAG, "Failed to get characteristic count (status=%d)", status);
     return;
   }
   if (count == 0) {
