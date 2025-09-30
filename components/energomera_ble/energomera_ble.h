@@ -74,12 +74,75 @@ handle = 0x004e, char properties = 0x02, char value handle = 0x004f, uuid = b91b
 // static const char *SERVICE_UUID = "b91b0100-8bef-45e2-97c3-1cd862d914df";
 // static const char *TX_CHAR_UUID = "b91b0105-8bef-45e2-97c3-1cd862d914df";
 // static const char *RX_CHAR_UUID = "b91b0106-8bef-45e2-97c3-1cd862d914df";
-namespace espbt = esphome::esp32_ble_tracker;
+// namespace espbt = esphome::esp32_ble_tracker;
 
-static const espbt::ESPBTUUID SERVICE_UUID = espbt::ESPBTUUID::from_raw("b91b0100-8bef-45e2-97c3-1cd862d914df");
-static const espbt::ESPBTUUID CHAR_TX_UUID = espbt::ESPBTUUID::from_raw("b91b0105-8bef-45e2-97c3-1cd862d914df");
-static const espbt::ESPBTUUID CHAR_RX_UUID = espbt::ESPBTUUID::from_raw("b91b0106-8bef-45e2-97c3-1cd862d914df");
+// static const espbt::ESPBTUUID SERVICE_UUID = espbt::ESPBTUUID::from_raw("b91b0100-8bef-45e2-97c3-1cd862d914df");
+// static const espbt::ESPBTUUID CHAR_TX_UUID = espbt::ESPBTUUID::from_raw("b91b0105-8bef-45e2-97c3-1cd862d914df");
+// static const espbt::ESPBTUUID CHAR_RX_UUID = espbt::ESPBTUUID::from_raw("b91b0106-8bef-45e2-97c3-1cd862d914df");
 
+
+class EnergomeraBleComponent : public PollingComponent, public ble_client::BLEClientNode {
+ public:
+  EnergomeraBleComponent();
+
+  void setup() override;
+  void loop() override;
+  void update() override;
+  void dump_config() override;
+
+  void set_pin_code(const std::string &pin_code) { this->pin_code_ = pin_code; }
+
+ protected:
+  enum class ClientState : uint8_t {
+    IDLE,
+    SCANNING,
+    CONNECTING,
+    PAIRING,
+    DISCOVERING,
+    ENABLING_NOTIFICATIONS,
+    READY,
+    ERROR,
+  };
+
+  void change_state_(ClientState next_state);
+  void start_scan_();
+  void stop_scan_();
+  void request_connect_(); // uses parent BLE client address
+  void initiate_pairing_();
+  void start_service_discovery_();
+  void enable_notifications_();
+  void reset_with_backoff_(const char *reason = nullptr);
+  void sync_address_from_parent_();
+
+  // BLEClientNode overrides
+  void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
+                           esp_ble_gattc_cb_param_t *param) override;
+  void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
+
+  // Helpers for UUID matching
+  bool match_service_uuid_(const esp_bt_uuid_t &uuid) const;
+  bool match_characteristic_uuid_(const esp_bt_uuid_t &uuid, const esp_bt_uuid_t &target) const;
+
+  // Cached handles
+  uint16_t service_start_handle_{0};
+  uint16_t service_end_handle_{0};
+  uint16_t tx_char_handle_{0};
+  uint16_t notify_cccd_handle_{0};
+
+  ClientState state_{ClientState::IDLE};
+  std::array<uint8_t, 6> target_address_{};
+  bool address_set_{false};
+  std::string pin_code_;
+  uint32_t state_deadline_{0};
+  uint8_t retry_count_{0};
+
+  static constexpr uint32_t kScanDurationMs = 15000;
+  static constexpr uint32_t kOperationTimeoutMs = 30000;
+  static constexpr uint8_t kMaxRetries = 5;
+};
+
+
+/*
 class EnergomeraBleComponent : public PollingComponent, public ble_client::BLEClientNode {
  public:
   EnergomeraBleComponent() : tag_(generateTag()){};
@@ -88,7 +151,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void dump_config() override;
   void loop() override;
   void update() override;
-  float get_setup_priority() const override { return setup_priority::DATA; };
+  float get_setup_priority() const override { return setup_priority::BLUETOOTH; };
 
   void set_meter_address(const std::string &addr) { this->meter_address_ = addr; };
   void set_receive_timeout_ms(uint32_t timeout) { this->receive_timeout_ms_ = timeout; };
@@ -103,15 +166,54 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
                                    esp_ble_gattc_cb_param_t *param) override;
   virtual void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
 
-  bool discover_characteristics_();
-
 #ifdef USE_TIME
   void set_time_source(time::RealTimeClock *rtc) { this->time_source_ = rtc; };
   void sync_device_time();  // set current time from RTC
 #endif
   void set_device_time(uint32_t timestamp);  // set time from given timestamp
 
+
+  // BLE starts //////////////////////////////////////////////////////////////////////////////////////////
   void set_passkey(uint32_t passkey) { this->passkey_ = passkey; };
+  void set_pin_code(const std::string &pin_code) { this->pin_code_ = pin_code; }
+  void change_state_(ClientState next_state);
+  void start_scan_();
+  void stop_scan_();
+  void request_connect_(); // uses parent BLE client address
+  void initiate_pairing_();
+  void start_service_discovery_();
+  void enable_notifications_();
+  void reset_with_backoff_(const char *reason = nullptr);
+  void sync_address_from_parent_();
+
+  // BLEClientNode overrides
+  void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
+                           esp_ble_gattc_cb_param_t *param) override;
+  void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
+
+  // Helpers for UUID matching
+  bool match_service_uuid_(const esp_bt_uuid_t &uuid) const;
+  bool match_characteristic_uuid_(const esp_bt_uuid_t &uuid, const esp_bt_uuid_t &target) const;
+
+  // Cached handles
+  uint16_t service_start_handle_{0};
+  uint16_t service_end_handle_{0};
+  uint16_t tx_char_handle_{0};
+  uint16_t notify_cccd_handle_{0};
+
+  ClientState state_{ClientState::IDLE};
+  std::array<uint8_t, 6> target_address_{};
+  bool address_set_{false};
+  std::string pin_code_;
+  uint32_t state_deadline_{0};
+  uint8_t retry_count_{0};
+
+  static constexpr uint32_t kScanDurationMs = 15000;
+  static constexpr uint32_t kOperationTimeoutMs = 30000;
+  static constexpr uint8_t kMaxRetries = 5;
+
+
+  // BLE ends //////////////////////////////////////////////////////////////////////////////////////////
 
  protected:
   uint32_t passkey_{0};
@@ -119,11 +221,6 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   uint32_t receive_timeout_ms_{500};
   uint32_t delay_between_requests_ms_{50};
 
-  // BLE
-  bool ble_status_notification_received_ = false;
-  uint8_t ble_no_response_count_{0};
-  uint16_t char_tx_handle_;
-  uint16_t char_rx_notify_handle_;
 
 #ifdef USE_TIME
   time::RealTimeClock *time_source_{nullptr};
@@ -200,9 +297,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
 
   void clear_rx_buffers_();
 
-  void set_baud_rate_(uint32_t baud_rate);
-  bool are_baud_rates_different_() const { return baud_rate_handshake_ != baud_rate_; }
-
+  
   uint8_t calculate_crc_prog_frame_(uint8_t *data, size_t length, bool set_crc = false);
   bool check_crc_prog_frame_(uint8_t *data, size_t length);
 
@@ -265,6 +360,6 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   esp_err_t write_array(uint8_t *data, size_t length);
   void receive_data(uint8_t *data, size_t length);
 };
-
+*/
 }  // namespace energomera_ble
 }  // namespace esphome
