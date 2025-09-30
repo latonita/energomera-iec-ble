@@ -94,6 +94,8 @@ void EnergomeraBleComponent::sync_address_from_parent_() {
 bool EnergomeraBleComponent::match_service_uuid_(const esp_bt_uuid_t &uuid) const {
   if (uuid.len == ESP_UUID_LEN_16)
     return uuid.uuid.uuid16 == 0x0100;
+  if (uuid.len == ESP_UUID_LEN_32)
+    return uuid.uuid.uuid32 == 0x00000100;  // defensive
   if (uuid.len == ESP_UUID_LEN_128)
     return std::memcmp(uuid.uuid.uuid128, ENERGOMERA_SERVICE_UUID_128, sizeof(ENERGOMERA_SERVICE_UUID_128)) == 0;
   return false;
@@ -168,6 +170,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->version_char_handle_ = 0;
       this->version_requested_ = false;
       this->version_reported_ = false;
+      this->service_search_requested_ = false;
       this->sync_address_from_parent_();
       this->initiate_pairing_(param->connect.remote_bda);
       break;
@@ -193,6 +196,23 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
     case ESP_GATTC_SEARCH_RES_EVT: {
       if (param->search_res.conn_id != this->parent_->get_conn_id())
         break;
+      const auto &uuid = param->search_res.srvc_id.uuid;
+      if (uuid.len == ESP_UUID_LEN_16) {
+        ESP_LOGD(TAG, "Service discovered: uuid16=0x%04X handles=0x%04X-0x%04X", uuid.uuid.uuid16,
+                 param->search_res.start_handle, param->search_res.end_handle);
+      } else if (uuid.len == ESP_UUID_LEN_32) {
+        ESP_LOGD(TAG, "Service discovered: uuid32=0x%08X handles=0x%04X-0x%04X", uuid.uuid.uuid32,
+                 param->search_res.start_handle, param->search_res.end_handle);
+      } else if (uuid.len == ESP_UUID_LEN_128) {
+        char buf[37];
+        snprintf(buf, sizeof(buf), "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                 uuid.uuid.uuid128[15], uuid.uuid.uuid128[14], uuid.uuid.uuid128[13], uuid.uuid.uuid128[12],
+                 uuid.uuid.uuid128[11], uuid.uuid.uuid128[10], uuid.uuid.uuid128[9], uuid.uuid.uuid128[8],
+                 uuid.uuid.uuid128[7], uuid.uuid.uuid128[6], uuid.uuid.uuid128[5], uuid.uuid.uuid128[4],
+                 uuid.uuid.uuid128[3], uuid.uuid.uuid128[2], uuid.uuid.uuid128[1], uuid.uuid.uuid128[0]);
+        ESP_LOGD(TAG, "Service discovered: uuid128=%s handles=0x%04X-0x%04X", buf, param->search_res.start_handle,
+                 param->search_res.end_handle);
+      }
       if (this->match_service_uuid_(param->search_res.srvc_id.uuid)) {
         this->service_start_handle_ = param->search_res.start_handle;
         this->service_end_handle_ = param->search_res.end_handle;
@@ -205,7 +225,21 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       if (param->search_cmpl.conn_id != this->parent_->get_conn_id())
         break;
       if (this->service_start_handle_ == 0) {
-        ESP_LOGW(TAG, "Energomera service not found during discovery");
+        if (!this->service_search_requested_) {
+          esp_bt_uuid_t svc_uuid{};
+          svc_uuid.len = ESP_UUID_LEN_16;
+          svc_uuid.uuid.uuid16 = 0x0100;
+          esp_err_t status =
+              esp_ble_gattc_search_service(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), &svc_uuid);
+          if (status == ESP_OK) {
+            this->service_search_requested_ = true;
+            ESP_LOGW(TAG, "Energomera service not found; requesting targeted search");
+            break;
+          }
+          ESP_LOGW(TAG, "Energomera service search request failed: %d", status);
+        } else {
+          ESP_LOGW(TAG, "Energomera service not found during discovery");
+        }
         break;
       }
       this->request_firmware_version_();

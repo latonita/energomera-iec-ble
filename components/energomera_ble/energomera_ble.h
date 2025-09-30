@@ -62,6 +62,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   bool address_set_{false};
   bool version_requested_{false};
   bool version_reported_{false};
+  bool service_search_requested_{false};
   std::string pin_code_;
 };
 
