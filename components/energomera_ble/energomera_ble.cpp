@@ -155,7 +155,7 @@ void EnergomeraBleComponent::request_firmware_version_() {
     }
 
     if (!resolved) {
-      uint16_t fallback = this->service_start_handle_ + 2;  // documented value handle for 0x0101
+      uint16_t fallback = this->service_start_handle_ + 1;  // characteristic value handle typically start+1
       if (fallback > this->service_start_handle_ && fallback < this->service_start_handle_ + 0x40) {
         this->version_char_handle_ = fallback;
         resolved = true;
