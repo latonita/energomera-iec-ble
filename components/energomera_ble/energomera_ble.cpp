@@ -92,9 +92,11 @@ void EnergomeraBleComponent::sync_address_from_parent_() {
 }
 
 bool EnergomeraBleComponent::match_service_uuid_(const esp_bt_uuid_t &uuid) const {
-  if (uuid.len != ESP_UUID_LEN_128)
-    return false;
-  return std::memcmp(uuid.uuid.uuid128, ENERGOMERA_SERVICE_UUID_128, sizeof(ENERGOMERA_SERVICE_UUID_128)) == 0;
+  if (uuid.len == ESP_UUID_LEN_16)
+    return uuid.uuid.uuid16 == 0x0100;
+  if (uuid.len == ESP_UUID_LEN_128)
+    return std::memcmp(uuid.uuid.uuid128, ENERGOMERA_SERVICE_UUID_128, sizeof(ENERGOMERA_SERVICE_UUID_128)) == 0;
+  return false;
 }
 
 void EnergomeraBleComponent::initiate_pairing_(const esp_bd_addr_t remote_bda) {
@@ -122,13 +124,20 @@ void EnergomeraBleComponent::request_firmware_version_() {
   }
   if (this->version_char_handle_ == 0) {
     esp_bt_uuid_t version_uuid{};
-    version_uuid.len = ESP_UUID_LEN_128;
-    std::memcpy(version_uuid.uuid.uuid128, ENERGOMERA_VERSION_UUID_128, sizeof(ENERGOMERA_VERSION_UUID_128));
+    version_uuid.len = ESP_UUID_LEN_16;
+    version_uuid.uuid.uuid16 = 0x0101;
     esp_gattc_char_elem_t result{};
     uint16_t count = 1;
     esp_gatt_status_t status = esp_ble_gattc_get_char_by_uuid(
         this->parent_->get_gattc_if(), this->parent_->get_conn_id(), this->service_start_handle_,
         this->service_end_handle_, version_uuid, &result, &count);
+    if (status != ESP_GATT_OK || count == 0) {
+      version_uuid.len = ESP_UUID_LEN_128;
+      std::memcpy(version_uuid.uuid.uuid128, ENERGOMERA_VERSION_UUID_128, sizeof(ENERGOMERA_VERSION_UUID_128));
+      status = esp_ble_gattc_get_char_by_uuid(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                              this->service_start_handle_, this->service_end_handle_, version_uuid,
+                                              &result, &count);
+    }
     if (status != ESP_GATT_OK || count == 0) {
       ESP_LOGW(TAG, "Unable to resolve firmware version characteristic (status=%d, count=%u)", status, count);
       return;
