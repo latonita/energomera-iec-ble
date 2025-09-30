@@ -124,57 +124,51 @@ void EnergomeraBleComponent::request_firmware_version_() {
     ESP_LOGW(TAG, "Service handles not resolved, cannot read firmware version yet");
     return;
   }
-  esp_gattc_char_elem_t *char_elems = nullptr;
-  uint16_t count = 0;
-  esp_gatt_status_t status = esp_ble_gattc_get_attr_count(
-      this->parent_->get_gattc_if(), this->parent_->get_conn_id(), ESP_GATT_DB_CHARACTERISTIC, this->service_start_handle_,
-      this->service_end_handle_, ESP_GATT_INVALID_HANDLE, &count);
-  if (status != ESP_GATT_OK) {
-    ESP_LOGW(TAG, "Failed to get characteristic count (status=%d)", status);
-    return;
-  }
-  if (count == 0) {
-    ESP_LOGW(TAG, "No characteristics reported for Energomera service");
-    return;
-  }
-  char_elems = (esp_gattc_char_elem_t *) heap_caps_malloc(sizeof(esp_gattc_char_elem_t) * count, MALLOC_CAP_8BIT);
-  if (char_elems == nullptr) {
-    ESP_LOGW(TAG, "Out of memory while enumerating characteristics (count=%u)", count);
-    return;
-  }
-  status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                      this->service_start_handle_, this->service_end_handle_, char_elems, &count, 0);
-  if (status != ESP_GATT_OK) {
-    ESP_LOGW(TAG, "Failed to fetch characteristic list (status=%d)", status);
-    free(char_elems);
-    return;
-  }
-  for (uint16_t i = 0; i < count; i++) {
-    auto &elem = char_elems[i];
-    if (elem.uuid.len == ESP_UUID_LEN_16) {
-      ESP_LOGD(TAG, "Characteristic handle=0x%04X uuid16=0x%04X properties=0x%02X", elem.char_handle,
-               elem.uuid.uuid.uuid16, elem.properties);
-    } else if (elem.uuid.len == ESP_UUID_LEN_128) {
-      char uuid_buf[37];
-      snprintf(uuid_buf, sizeof(uuid_buf), "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-               elem.uuid.uuid.uuid128[15], elem.uuid.uuid.uuid128[14], elem.uuid.uuid.uuid128[13],
-               elem.uuid.uuid.uuid128[12], elem.uuid.uuid.uuid128[11], elem.uuid.uuid.uuid128[10],
-               elem.uuid.uuid.uuid128[9], elem.uuid.uuid.uuid128[8], elem.uuid.uuid.uuid128[7], elem.uuid.uuid.uuid128[6],
-               elem.uuid.uuid.uuid128[5], elem.uuid.uuid.uuid128[4], elem.uuid.uuid.uuid128[3],
-               elem.uuid.uuid.uuid128[2], elem.uuid.uuid.uuid128[1], elem.uuid.uuid.uuid128[0]);
-      ESP_LOGD(TAG, "Characteristic handle=0x%04X uuid128=%s properties=0x%02X", elem.char_handle, uuid_buf,
-               elem.properties);
-    }
-    if (elem.uuid.len == ESP_UUID_LEN_16 && elem.uuid.uuid.uuid16 == 0x0101) {
-      this->version_char_handle_ = char_elems[i].char_handle;
-      break;
-    }
-  }
-  free(char_elems);
+
   if (this->version_char_handle_ == 0) {
-    ESP_LOGW(TAG, "Firmware version characteristic (0x0101) not found in service");
-    return;
+    bool resolved = false;
+    uint16_t count = 0;
+    esp_gatt_status_t status = esp_ble_gattc_get_attr_count(
+        this->parent_->get_gattc_if(), this->parent_->get_conn_id(), ESP_GATT_DB_CHARACTERISTIC,
+        this->service_start_handle_, this->service_end_handle_, ESP_GATT_INVALID_HANDLE, &count);
+    if (status == ESP_GATT_OK && count > 0) {
+      auto *char_elems = (esp_gattc_char_elem_t *) heap_caps_malloc(sizeof(esp_gattc_char_elem_t) * count, MALLOC_CAP_8BIT);
+      if (char_elems != nullptr) {
+        status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                            this->service_start_handle_, this->service_end_handle_, char_elems, &count, 0);
+        if (status == ESP_GATT_OK) {
+          for (uint16_t i = 0; i < count; i++) {
+            auto &elem = char_elems[i];
+            if (elem.uuid.len == ESP_UUID_LEN_16) {
+              ESP_LOGD(TAG, "Characteristic handle=0x%04X uuid16=0x%04X properties=0x%02X", elem.char_handle,
+                       elem.uuid.uuid.uuid16, elem.properties);
+              if (elem.uuid.uuid.uuid16 == 0x0101) {
+                this->version_char_handle_ = elem.char_handle;
+                resolved = true;
+                break;
+              }
+            }
+          }
+        }
+        free(char_elems);
+      }
+    }
+
+    if (!resolved) {
+      uint16_t fallback = this->service_start_handle_ + 2;  // documented value handle for 0x0101
+      if (fallback > this->service_start_handle_ && fallback < this->service_start_handle_ + 0x40) {
+        this->version_char_handle_ = fallback;
+        resolved = true;
+        ESP_LOGW(TAG, "Firmware characteristic not enumerated, using fallback handle 0x%04X", fallback);
+      }
+    }
+
+    if (!resolved) {
+      ESP_LOGW(TAG, "Firmware version characteristic (0x0101) not found in service");
+      return;
+    }
   }
+
   esp_err_t err = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
                                           this->version_char_handle_, ESP_GATT_AUTH_REQ_NONE);
   if (err != ESP_OK) {
