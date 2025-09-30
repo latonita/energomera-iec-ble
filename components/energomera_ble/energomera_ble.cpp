@@ -147,6 +147,20 @@ void EnergomeraBleComponent::request_firmware_version_() {
                 resolved = true;
                 break;
               }
+            } else if (elem.uuid.len == ESP_UUID_LEN_128) {
+              ESP_LOGD(TAG, "Characteristic handle=0x%04X uuid128=%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X properties=0x%02X",
+                       elem.char_handle, elem.uuid.uuid.uuid128[15], elem.uuid.uuid.uuid128[14],
+                       elem.uuid.uuid.uuid128[13], elem.uuid.uuid.uuid128[12], elem.uuid.uuid.uuid128[11],
+                       elem.uuid.uuid.uuid128[10], elem.uuid.uuid.uuid128[9], elem.uuid.uuid.uuid128[8],
+                       elem.uuid.uuid.uuid128[7], elem.uuid.uuid.uuid128[6], elem.uuid.uuid.uuid128[5],
+                       elem.uuid.uuid.uuid128[4], elem.uuid.uuid.uuid128[3], elem.uuid.uuid.uuid128[2],
+                       elem.uuid.uuid.uuid128[1], elem.uuid.uuid.uuid128[0], elem.properties);
+              if (std::memcmp(elem.uuid.uuid.uuid128, ENERGOMERA_VERSION_UUID_128, sizeof(ENERGOMERA_VERSION_UUID_128)) ==
+                  0) {
+                this->version_char_handle_ = elem.char_handle;
+                resolved = true;
+                break;
+              }
             }
           }
         }
@@ -155,11 +169,13 @@ void EnergomeraBleComponent::request_firmware_version_() {
     }
 
     if (!resolved) {
-      uint16_t fallback = this->service_start_handle_ + 1;  // characteristic value handle typically start+1
+      uint16_t fallback = this->service_start_handle_ + 1;
+      // When enumeration fails we land on the characteristic declaration; the value follows immediately after.
       if (fallback > this->service_start_handle_ && fallback < this->service_start_handle_ + 0x40) {
-        this->version_char_handle_ = fallback;
+        this->version_char_handle_ = fallback + 1;
         resolved = true;
-        ESP_LOGW(TAG, "Firmware characteristic not enumerated, using fallback handle 0x%04X", fallback);
+        ESP_LOGW(TAG, "Firmware characteristic not enumerated, using fallback handle 0x%04X",
+                 this->version_char_handle_);
       }
     }
 
