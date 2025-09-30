@@ -4,6 +4,7 @@
 #include "esphome/core/time.h"
 #include "energomera_ble.h"
 #include <sstream>
+#include <string>
 
 namespace esphome {
 namespace energomera_ble {
@@ -21,8 +22,21 @@ void EnergomeraBleComponent::setup() {
     this->mark_failed();
     return;
   }
-  this->parent_->init_client(this);
   this->sync_address_from_parent_();
+  this->reconnect_at_ = 0;
+
+  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_IO;
+  uint8_t key_size = 16;
+  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+
+  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &resp_key, sizeof(resp_key));
+
   this->change_state_(ClientState::IDLE);
 }
 
@@ -44,10 +58,12 @@ void EnergomeraBleComponent::loop() {
   switch (this->state_) {
     case ClientState::IDLE:
       if (!this->address_set_) {
-        ESP_LOGD(TAG, "Waiting for target address configuration before scanning");
+        ESP_LOGD(TAG, "Waiting for target address configuration before connecting");
         break;
       }
-      this->start_scan_();
+      if (this->reconnect_at_ != 0 && now < this->reconnect_at_)
+        break;
+      this->begin_connect_();
       break;
     case ClientState::SCANNING:
     case ClientState::CONNECTING:
@@ -87,50 +103,57 @@ void EnergomeraBleComponent::change_state_(ClientState next_state) {
     return;
   ESP_LOGD(TAG, "State change: %d -> %d", static_cast<int>(this->state_), static_cast<int>(next_state));
   this->state_ = next_state;
-  this->state_deadline_ = millis() + kOperationTimeoutMs;
+  if (next_state == ClientState::IDLE || next_state == ClientState::READY || next_state == ClientState::ERROR)
+    this->state_deadline_ = 0;
+  else
+    this->state_deadline_ = millis() + kOperationTimeoutMs;
 }
 
-void EnergomeraBleComponent::start_scan_() {
-  ESP_LOGI(TAG, "Starting targeted BLE scan");
-  if (esp_ble_gap_start_scanning(kScanDurationMs / 1000) != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to start BLE scan");
-    this->reset_with_backoff_("scan start failed");
-    return;
-  }
-  this->change_state_(ClientState::SCANNING);
-}
-
-void EnergomeraBleComponent::stop_scan_() { esp_ble_gap_stop_scanning(); }
-
-void EnergomeraBleComponent::request_connect_() {
+void EnergomeraBleComponent::begin_connect_() {
   if (!this->parent_) {
     ESP_LOGE(TAG, "Cannot connect, no BLE client parent");
     this->reset_with_backoff_("no parent");
     return;
   }
-  ESP_LOGI(TAG, "Opening GATT connection");
-  int res = this->parent_->gattc_open(this->target_address_.data(), true);
-  if (res != 0) {
-    ESP_LOGE(TAG, "gattc_open failed: %d", res);
-    this->reset_with_backoff_("gattc_open failed");
-    return;
-  }
+  ESP_LOGI(TAG, "Requesting BLE connection");
+  this->parent_->set_enabled(true);
+  this->parent_->connect();
+  this->reconnect_at_ = 0;
   this->change_state_(ClientState::CONNECTING);
 }
 
 void EnergomeraBleComponent::initiate_pairing_() {
-  if (this->pin_code_.empty()) {
-    ESP_LOGI(TAG, "No PIN configured, assuming bonding already established");
-    this->start_service_discovery_();
+  // if (this->pin_code_.empty()) {
+  //   ESP_LOGI(TAG, "No PIN configured, assuming bonding already established");
+  //   this->start_service_discovery_();
+  //   return;
+  // }
+  if (this->parent_ == nullptr) {
+    ESP_LOGE(TAG, "Cannot initiate pairing, parent not set");
+    this->reset_with_backoff_("no parent for pairing");
     return;
   }
-  ESP_LOGI(TAG, "Sending pairing PIN");
-  esp_ble_set_encryption(this->target_address_.data(), ESP_BLE_SEC_ENCRYPT_MITM);
+  uint8_t *remote = this->parent_->get_remote_bda();
+  if (remote == nullptr) {
+    ESP_LOGE(TAG, "Cannot initiate pairing, remote address unknown");
+    this->reset_with_backoff_("no remote address");
+    return;
+  }
+  ESP_LOGI(TAG, "Requesting encrypted link with PIN");
+  esp_err_t status = esp_ble_set_encryption(remote, ESP_BLE_SEC_ENCRYPT_MITM);
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "esp_ble_set_encryption failed: %d", status);
+    this->reset_with_backoff_("set encryption failed");
+    return;
+  }
   this->change_state_(ClientState::PAIRING);
 }
 
 void EnergomeraBleComponent::start_service_discovery_() {
   ESP_LOGI(TAG, "Discovering Energomera service");
+  this->service_start_handle_ = 0;
+  this->service_end_handle_ = 0;
+  this->version_char_handle_ = 0;
   if (esp_ble_gattc_search_service(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), nullptr) != ESP_OK) {
     ESP_LOGE(TAG, "Failed to start service discovery");
     this->reset_with_backoff_("discover failed");
@@ -149,6 +172,30 @@ void EnergomeraBleComponent::enable_notifications_() {
                                    ESP_GATT_AUTH_REQ_NONE);
   }
   this->change_state_(ClientState::ENABLING_NOTIFICATIONS);
+}
+
+void EnergomeraBleComponent::request_firmware_version_() {
+  if (this->parent_ == nullptr) {
+    ESP_LOGE(TAG, "Cannot read firmware version, parent not set");
+    this->reset_with_backoff_("no parent for read");
+    return;
+  }
+  if (this->version_char_handle_ == 0) {
+    ESP_LOGE(TAG, "Firmware version handle not resolved");
+    this->reset_with_backoff_("no version handle");
+    return;
+  }
+  esp_err_t status = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                             this->version_char_handle_, ESP_GATT_AUTH_REQ_NONE);
+  if (status != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initiate firmware version read: %d", status);
+    this->reset_with_backoff_("version read start failed");
+    return;
+  }
+  if (this->state_ != ClientState::DISCOVERING)
+    this->change_state_(ClientState::DISCOVERING);
+  else
+    this->state_deadline_ = millis() + kOperationTimeoutMs;
 }
 
 void EnergomeraBleComponent::sync_address_from_parent_() {
@@ -184,13 +231,15 @@ void EnergomeraBleComponent::reset_with_backoff_(const char *reason) {
     this->mark_failed();
     return;
   }
-  this->stop_scan_();
-  this->parent_->gattc_close();
+  if (this->parent_ != nullptr)
+    this->parent_->disconnect();
   this->service_start_handle_ = 0;
   this->service_end_handle_ = 0;
   this->tx_char_handle_ = 0;
   this->notify_cccd_handle_ = 0;
-  this->state_deadline_ = millis() + 5000 * this->retry_count_;
+  this->version_char_handle_ = 0;
+  uint32_t delay_ms = 5000 * this->retry_count_;
+  this->reconnect_at_ = millis() + delay_ms;
   this->change_state_(ClientState::IDLE);
 }
 
@@ -220,40 +269,91 @@ bool EnergomeraBleComponent::match_characteristic_uuid_(const esp_bt_uuid_t &uui
 void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                                                  esp_ble_gattc_cb_param_t *param) {
   switch (event) {
-    case ESP_GATTC_OPEN_EVT:
+    case ESP_GATTC_OPEN_EVT: {
       if (param->open.status != ESP_GATT_OK) {
         ESP_LOGE(TAG, "GATTC open failed: %d", param->open.status);
         this->reset_with_backoff_("open failed");
         return;
       }
       ESP_LOGI(TAG, "GATT client connected");
+      this->retry_count_ = 0;
       this->change_state_(ClientState::CONNECTING);
       this->initiate_pairing_();
-      break;
-    case ESP_GATTC_SEARCH_RES_EVT:
+    } break;
+    case ESP_GATTC_CFG_MTU_EVT: {
+      if (param->cfg_mtu.status == ESP_GATT_OK) {
+        ESP_LOGD(TAG, "MTU configured: %d", param->cfg_mtu.mtu);
+      } else {
+        ESP_LOGW(TAG, "MTU configuration failed: %d", param->cfg_mtu.status);
+      }
+    } break;
+    case ESP_GATTC_SEARCH_RES_EVT: {
       if (!this->match_service_uuid_(param->search_res.srvc_id.uuid))
         break;
       this->service_start_handle_ = param->search_res.start_handle;
       this->service_end_handle_ = param->search_res.end_handle;
       ESP_LOGI(TAG, "Energomera service found: handles 0x%04X-0x%04X", this->service_start_handle_,
                this->service_end_handle_);
-      break;
-    case ESP_GATTC_SEARCH_CMPL_EVT:
+    } break;
+    case ESP_GATTC_SEARCH_CMPL_EVT: {
       if (this->service_start_handle_ == 0) {
         ESP_LOGW(TAG, "Energomera service not found");
+        if (this->state_ == ClientState::PAIRING) {
+          ESP_LOGW(TAG, "Service discovery will be retried after pairing completes");
+          return;
+        }
         this->reset_with_backoff_("service missing");
         return;
       }
       ESP_LOGI(TAG, "Service discovery complete");
-      this->enable_notifications_();
-      break;
-    case ESP_GATTC_NOTIFY_EVT:
+
+      esp_bt_uuid_t version_uuid{};
+      version_uuid.len = ESP_UUID_LEN_16;
+      version_uuid.uuid.uuid16 = 0x0101;
+      esp_gattc_char_elem_t version_result{};
+      uint16_t count = 1;
+      esp_gatt_status_t status = esp_ble_gattc_get_char_by_uuid(
+          this->parent_->get_gattc_if(), this->parent_->get_conn_id(), this->service_start_handle_,
+          this->service_end_handle_, version_uuid, &version_result, &count);
+      if (status != ESP_GATT_OK || count == 0) {
+        ESP_LOGE(TAG, "Failed to locate firmware version characteristic: status=%d count=%u", status, count);
+        this->reset_with_backoff_("version char missing");
+        return;
+      }
+      this->version_char_handle_ = version_result.char_handle;
+      ESP_LOGI(TAG, "Firmware version characteristic handle: 0x%04X", this->version_char_handle_);
+      this->request_firmware_version_();
+    } break;
+    case ESP_GATTC_READ_CHAR_EVT: {
+      if (param->read.conn_id != this->parent_->get_conn_id())
+        break;
+      if (param->read.handle != this->version_char_handle_)
+        break;
+      if (param->read.status != ESP_GATT_OK) {
+        ESP_LOGW(TAG, "Firmware version read failed: %d", param->read.status);
+        this->reset_with_backoff_("version read failed");
+        break;
+      }
+      if (param->read.value_len == 0U) {
+        ESP_LOGW(TAG, "Firmware version characteristic returned empty value");
+      } else {
+        std::string version(reinterpret_cast<const char *>(param->read.value),
+                            reinterpret_cast<const char *>(param->read.value) + param->read.value_len);
+        auto nul = version.find('\0');
+        if (nul != std::string::npos)
+          version.resize(nul);
+        ESP_LOGI(TAG, "Meter firmware version: %s", version.c_str());
+      }
+      this->retry_count_ = 0;
+      this->change_state_(ClientState::READY);
+    } break;
+    case ESP_GATTC_NOTIFY_EVT: {
       ESP_LOGD(TAG, "Notification: length=%d", param->notify.value_len);
-      break;
-    case ESP_GATTC_DISCONNECT_EVT:
+    } break;
+    case ESP_GATTC_DISCONNECT_EVT: {
       ESP_LOGW(TAG, "GATT client disconnected: reason %d", param->disconnect.reason);
       this->reset_with_backoff_("disconnect");
-      break;
+    } break;
     default:
       break;
   }
@@ -261,45 +361,29 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 
 void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
   switch (event) {
-    case ESP_GAP_BLE_SCAN_RESULT_EVT: {
-      auto &result = param->scan_rst;
-      if (result.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
-        ESP_LOGD(TAG, "Scan complete");
-        if (this->state_ == ClientState::SCANNING)
-          this->reset_with_backoff_("device not found");
+    case ESP_GAP_BLE_PASSKEY_NOTIF_EVT: {
+      if (!this->parent_->check_addr(param->ble_security.key_notif.bd_addr))
         break;
-      }
-      if (!this->address_set_)
-        break;
-      if (memcmp(result.bda, this->target_address_.data(), 6) != 0)
-        break;
-      ESP_LOGI(TAG, "Target device discovered");
-      this->stop_scan_();
-      this->request_connect_();
-      break;
-    }
-    case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
       ESP_LOGI(TAG, "Passkey notification: %u", param->ble_security.key_notif.passkey);
-      break;
-    case ESP_GAP_BLE_PASSKEY_REQ_EVT:
-      if (this->pin_code_.empty()) {
-        ESP_LOGW(TAG, "Pairing requested but no PIN configured");
-        esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, 0);
-      } else {
-        uint32_t pin = atoi(this->pin_code_.c_str());
-        ESP_LOGI(TAG, "Supplying PIN %u", pin);
-        esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, pin);
-      }
-      break;
-    case ESP_GAP_BLE_AUTH_CMPL_EVT:
+    } break;
+    case ESP_GAP_BLE_PASSKEY_REQ_EVT: {
+      if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr))
+        break;
+      ESP_LOGI(TAG, "Supplying PIN %u", this->passkey_);
+      esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, this->passkey_);
+    } break;
+    case ESP_GAP_BLE_AUTH_CMPL_EVT: {
+      if (!this->parent_->check_addr(param->ble_security.auth_cmpl.bd_addr))
+        break;
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGI(TAG, "Pairing successful");
-        this->start_service_discovery_();
+        if (this->state_ != ClientState::DISCOVERING)
+          this->start_service_discovery_();
       } else {
         ESP_LOGE(TAG, "Pairing failed, status %d", param->ble_security.auth_cmpl.fail_reason);
         this->reset_with_backoff_("pairing failed");
       }
-      break;
+    } break;
     default:
       break;
   }

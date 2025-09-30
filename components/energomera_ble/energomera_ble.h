@@ -2,8 +2,14 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/ble_client/ble_client.h"
+
+#ifdef USE_SENSOR
 #include "esphome/components/sensor/sensor.h"
+#endif
+
+#ifdef USE_BINARY_SENSOR
 #include "esphome/components/binary_sensor/binary_sensor.h"
+#endif
 
 #include <esp_gattc_api.h>
 
@@ -28,7 +34,7 @@ static const size_t MAX_OUT_BUF_SIZE = 84;
 const uint8_t VAL_NUM = 12;
 using ValueRefsArray = std::array<char *, VAL_NUM>;
 
-using SensorMap = std::multimap<std::string, EnergomeraBleSensorBase *>;
+// using SensorMap = std::multimap<std::string, EnergomeraBleSensorBase *>;
 using SingleRequests = std::list<std::string>;
 
 using FrameStopFunction = std::function<bool(uint8_t *buf, size_t size)>;
@@ -68,9 +74,6 @@ handle = 0x004e, char properties = 0x02, char value handle = 0x004f, uuid = b91b
 
 */
 
-
-
-
 // static const char *SERVICE_UUID = "b91b0100-8bef-45e2-97c3-1cd862d914df";
 // static const char *TX_CHAR_UUID = "b91b0105-8bef-45e2-97c3-1cd862d914df";
 // static const char *RX_CHAR_UUID = "b91b0106-8bef-45e2-97c3-1cd862d914df";
@@ -79,7 +82,6 @@ handle = 0x004e, char properties = 0x02, char value handle = 0x004f, uuid = b91b
 // static const espbt::ESPBTUUID SERVICE_UUID = espbt::ESPBTUUID::from_raw("b91b0100-8bef-45e2-97c3-1cd862d914df");
 // static const espbt::ESPBTUUID CHAR_TX_UUID = espbt::ESPBTUUID::from_raw("b91b0105-8bef-45e2-97c3-1cd862d914df");
 // static const espbt::ESPBTUUID CHAR_RX_UUID = espbt::ESPBTUUID::from_raw("b91b0106-8bef-45e2-97c3-1cd862d914df");
-
 
 class EnergomeraBleComponent : public PollingComponent, public ble_client::BLEClientNode {
  public:
@@ -90,7 +92,13 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void update() override;
   void dump_config() override;
 
-  void set_pin_code(const std::string &pin_code) { this->pin_code_ = pin_code; }
+//  void set_pin_code(const std::string &pin_code) { this->pin_code_ = pin_code; }
+  void set_passkey(uint32_t passkey) { this->passkey_ = passkey; };
+
+  void set_meter_address(const std::string &addr) { this->meter_address_ = addr; };
+  void set_receive_timeout_ms(uint32_t timeout) { this->receive_timeout_ms_ = timeout; };
+  void set_delay_between_requests_ms(uint32_t delay) { this->delay_between_requests_ms_ = delay; };
+  void set_reboot_after_failure(uint16_t number_of_failures) { this->failures_before_reboot_ = number_of_failures; }
 
  protected:
   enum class ClientState : uint8_t {
@@ -105,12 +113,11 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   };
 
   void change_state_(ClientState next_state);
-  void start_scan_();
-  void stop_scan_();
-  void request_connect_(); // uses parent BLE client address
+  void begin_connect_();
   void initiate_pairing_();
   void start_service_discovery_();
   void enable_notifications_();
+  void request_firmware_version_();
   void reset_with_backoff_(const char *reason = nullptr);
   void sync_address_from_parent_();
 
@@ -128,19 +135,26 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   uint16_t service_end_handle_{0};
   uint16_t tx_char_handle_{0};
   uint16_t notify_cccd_handle_{0};
+  uint16_t version_char_handle_{0};
 
   ClientState state_{ClientState::IDLE};
   std::array<uint8_t, 6> target_address_{};
   bool address_set_{false};
-  std::string pin_code_;
+  
   uint32_t state_deadline_{0};
   uint8_t retry_count_{0};
+  uint32_t reconnect_at_{0};
 
-  static constexpr uint32_t kScanDurationMs = 15000;
   static constexpr uint32_t kOperationTimeoutMs = 30000;
   static constexpr uint8_t kMaxRetries = 5;
-};
 
+  //
+  uint32_t passkey_{0};
+  std::string meter_address_{""};
+  uint32_t receive_timeout_ms_{500};
+  uint32_t delay_between_requests_ms_{50};
+  uint8_t failures_before_reboot_{0};
+};
 
 /*
 class EnergomeraBleComponent : public PollingComponent, public ble_client::BLEClientNode {
@@ -297,7 +311,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
 
   void clear_rx_buffers_();
 
-  
+
   uint8_t calculate_crc_prog_frame_(uint8_t *data, size_t length, bool set_crc = false);
   bool check_crc_prog_frame_(uint8_t *data, size_t length);
 
