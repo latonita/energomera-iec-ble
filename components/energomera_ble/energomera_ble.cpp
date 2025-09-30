@@ -12,7 +12,7 @@ namespace energomera_ble {
 static const char *const TAG = "energomera_ble";
 
 static const uint8_t ENERGOMERA_SERVICE_UUID_128[16] = {0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97,
-                                                        0xe2, 0x45, 0xef, 0x8b, 0x01, 0x00, 0x1b, 0xb9};
+                                                        0xe2, 0x45, 0xef, 0x8b, 0x00, 0x01, 0x1b, 0xb9};
 static const uint8_t ENERGOMERA_VERSION_UUID_128[16] = {0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97,
                                                         0xe2, 0x45, 0xef, 0x8b, 0x01, 0x01, 0x1b, 0xb9};
 
@@ -216,6 +216,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       if (this->match_service_uuid_(param->search_res.srvc_id.uuid)) {
         this->service_start_handle_ = param->search_res.start_handle;
         this->service_end_handle_ = param->search_res.end_handle;
+        this->service_search_requested_ = false;
         ESP_LOGI(TAG, "Energomera service discovered: 0x%04X-0x%04X", this->service_start_handle_,
                  this->service_end_handle_);
       }
