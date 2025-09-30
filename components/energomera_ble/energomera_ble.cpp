@@ -124,30 +124,57 @@ void EnergomeraBleComponent::request_firmware_version_() {
     ESP_LOGW(TAG, "Service handles not resolved, cannot read firmware version yet");
     return;
   }
-  if (this->version_char_handle_ == 0) {
-    esp_bt_uuid_t version_uuid{};
-    version_uuid.len = ESP_UUID_LEN_16;
-    version_uuid.uuid.uuid16 = 0x0101;
-    esp_gattc_char_elem_t result{};
-    uint16_t count = 1;
-    esp_gatt_status_t status = esp_ble_gattc_get_char_by_uuid(
-        this->parent_->get_gattc_if(), this->parent_->get_conn_id(), this->service_start_handle_,
-        this->service_end_handle_, version_uuid, &result, &count);
-    if (status != ESP_GATT_OK || count == 0) {
-      version_uuid.len = ESP_UUID_LEN_128;
-      std::memcpy(version_uuid.uuid.uuid128, ENERGOMERA_VERSION_UUID_128, sizeof(ENERGOMERA_VERSION_UUID_128));
-      status = esp_ble_gattc_get_char_by_uuid(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                              this->service_start_handle_, this->service_end_handle_, version_uuid,
-                                              &result, &count);
-    }
-    if (status != ESP_GATT_OK || count == 0) {
-      ESP_LOGW(TAG, "Unable to resolve firmware version characteristic (status=%d, count=%u)", status, count);
-      return;
-    }
-    this->version_char_handle_ = result.char_handle;
-    ESP_LOGD(TAG, "Firmware version handle resolved: 0x%04X", this->version_char_handle_);
+  esp_gattc_char_elem_t *char_elems = nullptr;
+  uint16_t count = 0;
+  esp_gatt_status_t status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                                        this->service_start_handle_, this->service_end_handle_,
+                                                        nullptr, &count, 0);
+  if (status != ESP_GATT_OK) {
+    ESP_LOGW(TAG, "Failed to enumerate characteristics (status=%d, count=%u)", status, count);
+    return;
   }
-
+  if (count == 0) {
+    ESP_LOGW(TAG, "No characteristics reported for Energomera service");
+    return;
+  }
+  char_elems = (esp_gattc_char_elem_t *) heap_caps_malloc(sizeof(esp_gattc_char_elem_t) * count, MALLOC_CAP_8BIT);
+  if (char_elems == nullptr) {
+    ESP_LOGW(TAG, "Out of memory while enumerating characteristics (count=%u)", count);
+    return;
+  }
+  status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                      this->service_start_handle_, this->service_end_handle_, char_elems, &count, 0);
+  if (status != ESP_GATT_OK) {
+    ESP_LOGW(TAG, "Failed to fetch characteristic list (status=%d)", status);
+    free(char_elems);
+    return;
+  }
+  for (uint16_t i = 0; i < count; i++) {
+    auto &elem = char_elems[i];
+    if (elem.uuid.len == ESP_UUID_LEN_16) {
+      ESP_LOGD(TAG, "Characteristic handle=0x%04X uuid16=0x%04X properties=0x%02X", elem.char_handle,
+               elem.uuid.uuid.uuid16, elem.properties);
+    } else if (elem.uuid.len == ESP_UUID_LEN_128) {
+      char uuid_buf[37];
+      snprintf(uuid_buf, sizeof(uuid_buf), "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+               elem.uuid.uuid.uuid128[15], elem.uuid.uuid.uuid128[14], elem.uuid.uuid.uuid128[13],
+               elem.uuid.uuid.uuid128[12], elem.uuid.uuid.uuid128[11], elem.uuid.uuid.uuid128[10],
+               elem.uuid.uuid.uuid128[9], elem.uuid.uuid.uuid128[8], elem.uuid.uuid.uuid128[7], elem.uuid.uuid.uuid128[6],
+               elem.uuid.uuid.uuid128[5], elem.uuid.uuid.uuid128[4], elem.uuid.uuid.uuid128[3],
+               elem.uuid.uuid.uuid128[2], elem.uuid.uuid.uuid128[1], elem.uuid.uuid.uuid128[0]);
+      ESP_LOGD(TAG, "Characteristic handle=0x%04X uuid128=%s properties=0x%02X", elem.char_handle, uuid_buf,
+               elem.properties);
+    }
+    if (elem.uuid.len == ESP_UUID_LEN_16 && elem.uuid.uuid.uuid16 == 0x0101) {
+      this->version_char_handle_ = char_elems[i].char_handle;
+      break;
+    }
+  }
+  free(char_elems);
+  if (this->version_char_handle_ == 0) {
+    ESP_LOGW(TAG, "Firmware version characteristic (0x0101) not found in service");
+    return;
+  }
   esp_err_t err = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
                                           this->version_char_handle_, ESP_GATT_AUTH_REQ_NONE);
   if (err != ESP_OK) {
@@ -155,7 +182,7 @@ void EnergomeraBleComponent::request_firmware_version_() {
     return;
   }
   this->version_requested_ = true;
-  ESP_LOGD(TAG, "Firmware version read requested");
+  ESP_LOGD(TAG, "Firmware version read requested (handle 0x%04X)", this->version_char_handle_);
 }
 
 void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
