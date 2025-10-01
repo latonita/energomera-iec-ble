@@ -15,6 +15,7 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 namespace esphome {
 namespace energomera_ble {
@@ -46,6 +47,18 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void initiate_pairing_(const esp_bd_addr_t remote_bda);
   void request_firmware_version_();
   void sync_address_from_parent_();
+  bool resolve_characteristics_();
+  bool resolve_tx_descriptors_();
+  void enable_notifications_if_needed_();
+  void prepare_et0pe_command_();
+  void try_send_pending_command_();
+  bool send_next_fragment_();
+  void start_response_sequence_(uint8_t slot_count);
+  void issue_next_response_read_();
+  void handle_command_read_(const esp_ble_gattc_cb_param_t::gattc_read_evt_param &param);
+  void finalize_command_response_();
+  void handle_notification_(const esp_ble_gattc_cb_param_t::gattc_notify_evt_param &param);
+  uint16_t get_max_payload_() const;
 
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override;
@@ -57,12 +70,29 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   uint16_t service_start_handle_{0};
   uint16_t service_end_handle_{0};
   uint16_t version_char_handle_{0};
+  uint16_t tx_char_handle_{0};
+  uint16_t tx_cccd_handle_{0};
+  std::array<uint16_t, 16> response_char_handles_{};
 
   std::array<uint8_t, 6> target_address_{};
   bool address_set_{false};
   bool version_requested_{false};
   bool version_reported_{false};
   bool service_search_requested_{false};
+  bool characteristics_resolved_{false};
+  bool notifications_enabled_{false};
+  bool cccd_write_pending_{false};
+  bool command_pending_{false};
+  bool command_inflight_{false};
+  bool command_complete_{false};
+  bool response_in_progress_{false};
+  uint8_t tx_sequence_counter_{0};
+  bool tx_fragment_started_{false};
+  uint16_t mtu_{23};
+  std::vector<uint8_t> tx_message_remaining_;
+  std::vector<uint16_t> pending_response_handles_;
+  std::vector<uint8_t> response_buffer_;
+  uint16_t current_response_handle_{0};
   std::string pin_code_;
 };
 
