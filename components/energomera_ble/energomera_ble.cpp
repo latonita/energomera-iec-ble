@@ -343,12 +343,14 @@ bool EnergomeraBleComponent::resolve_tx_descriptors_() {
 }
 
 void EnergomeraBleComponent::enable_notifications_if_needed_() {
-  if (this->notifications_enabled_ || this->cccd_write_pending_)
+  if (this->notifications_enabled_ || this->cccd_write_pending_ || this->notification_failed_)
     return;
   if (this->parent_ == nullptr || this->tx_char_handle_ == 0 || this->tx_cccd_handle_ == 0)
     return;
   if (this->notify_retry_attempts_ >= 5) {
-    ESP_LOGW(TAG, "Notification enable retries exhausted; giving up");
+    ESP_LOGW(TAG, "Notification enable retries exhausted; switching to polling");
+    this->notification_failed_ = true;
+    this->fallback_to_polling_reads_();
     return;
   }
 
@@ -384,14 +386,32 @@ void EnergomeraBleComponent::enable_notifications_if_needed_() {
 
 void EnergomeraBleComponent::schedule_notification_retry_(uint32_t delay_ms) {
   if (this->notify_retry_attempts_ >= 5) {
-    ESP_LOGW(TAG, "Notification enable retries exhausted; giving up");
+    ESP_LOGW(TAG, "Notification enable retries exhausted; switching to polling");
     this->cccd_write_pending_ = false;
+    this->notification_failed_ = true;
+    this->fallback_to_polling_reads_();
     return;
   }
   this->cccd_write_pending_ = true;
   this->set_timeout("cccd_retry", delay_ms, [this]() {
     this->cccd_write_pending_ = false;
     this->enable_notifications_if_needed_();
+  });
+}
+
+void EnergomeraBleComponent::fallback_to_polling_reads_() {
+  if (!this->notification_failed_)
+    return;
+  if (!this->command_pending_ && !this->command_inflight_) {
+    this->command_pending_ = true;
+  }
+  if (!this->response_in_progress_)
+    this->issue_next_response_read_();
+  this->set_timeout("polling_read_loop", 1500, [this]() {
+    if (this->notification_failed_) {
+      this->issue_next_response_read_();
+      this->fallback_to_polling_reads_();
+    }
   });
 }
 
@@ -845,7 +865,9 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->tx_sequence_counter_ = 0;
       this->mtu_ = 23;
       this->notify_retry_attempts_ = 0;
+      this->notification_failed_ = false;
       this->cancel_timeout("cccd_retry");
+      this->cancel_timeout("polling_read_loop");
       std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
       this->pending_response_handles_.clear();
       this->response_buffer_.clear();
