@@ -1,7 +1,6 @@
 #include "energomera_ble.h"
 
 #include "esphome/core/log.h"
-#include "esphome/components/esp32_ble/ble_uuid.h"
 
 #include <cstring>
 #include <cstdlib>
@@ -169,19 +168,6 @@ void EnergomeraBleComponent::request_firmware_version_() {
       }
     }
 
-#ifdef USE_ESP32_BLE_UUID
-    if (!resolved && this->parent_ != nullptr) {
-      auto service_uuid = esphome::esp32_ble::ESPBTUUID::from_raw(ENERGOMERA_SERVICE_UUID_128);
-      auto version_uuid = esphome::esp32_ble::ESPBTUUID::from_raw(ENERGOMERA_VERSION_UUID_128);
-      auto *chr = this->parent_->get_characteristic(service_uuid, version_uuid);
-      if (chr != nullptr) {
-        this->version_char_handle_ = chr->handle;
-        resolved = true;
-        ESP_LOGD(TAG, "Firmware characteristic resolved via client cache: handle 0x%04X", this->version_char_handle_);
-      }
-    }
-#endif
-
     if (!resolved) {
       uint16_t fallback = this->service_start_handle_ + 1;
       // When enumeration fails we land on the characteristic declaration; the value follows immediately after.
@@ -200,7 +186,7 @@ void EnergomeraBleComponent::request_firmware_version_() {
   }
 
   esp_err_t err = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                          this->version_char_handle_, ESP_GATT_AUTH_REQ_MITM);
+                                          this->version_char_handle_, ESP_GATT_AUTH_REQ_NONE);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to request firmware version read: %d", err);
     return;
@@ -320,20 +306,11 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       }
       ESP_LOGD(TAG, "Firmware characteristic raw (%u bytes): %s", param->read.value_len, hex_dump.c_str());
 
-      const uint8_t *value = param->read.value;
-      size_t offset = 0;
-      while (offset < param->read.value_len && (value[offset] < 0x20 || value[offset] > 0x7E))
-        offset++;
-      size_t end = offset;
-      while (end < param->read.value_len && value[end] >= 0x20 && value[end] <= 0x7E)
-        end++;
-
-      std::string version;
-      if (offset < end) {
-        version.assign(reinterpret_cast<const char *>(value + offset), reinterpret_cast<const char *>(value + end));
-      } else {
-        version = "(unprintable)";
-      }
+      std::string version(reinterpret_cast<const char *>(param->read.value),
+                          reinterpret_cast<const char *>(param->read.value) + param->read.value_len);
+      auto nul_pos = version.find('\0');
+      if (nul_pos != std::string::npos)
+        version.resize(nul_pos);
       ESP_LOGI(TAG, "Meter firmware version: %s", version.c_str());
       this->version_reported_ = true;
       break;
