@@ -347,13 +347,24 @@ void EnergomeraBleComponent::enable_notifications_if_needed_() {
     return;
   if (this->parent_ == nullptr || this->tx_char_handle_ == 0 || this->tx_cccd_handle_ == 0)
     return;
+  if (this->notify_retry_attempts_ >= 5) {
+    ESP_LOGW(TAG, "Notification enable retries exhausted; giving up");
+    return;
+  }
 
   auto status = esp_ble_gattc_register_for_notify(this->parent_->get_gattc_if(), this->parent_->get_remote_bda(),
                                                   this->tx_char_handle_);
   if (status != ESP_OK) {
     ESP_LOGW(TAG, "esp_ble_gattc_register_for_notify failed: %d", status);
+    this->notify_retry_attempts_++;
+    uint32_t attempt = this->notify_retry_attempts_;
+    uint32_t delay = 300 + 200 * (attempt > 0 ? (attempt - 1U) : 0U);
+    this->schedule_notification_retry_(delay);
     return;
   }
+
+  this->cccd_write_pending_ = true;
+  this->notify_retry_attempts_++;
 
   uint16_t notify_en = 0x0001;
   auto err = esp_ble_gattc_write_char_descr(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
@@ -361,11 +372,27 @@ void EnergomeraBleComponent::enable_notifications_if_needed_() {
                                             ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to enable notifications on handle 0x%04X: %d", this->tx_cccd_handle_, err);
+    uint32_t attempt = this->notify_retry_attempts_;
+    uint32_t delay = 300 + 200 * (attempt > 0 ? (attempt - 1U) : 0U);
+    this->schedule_notification_retry_(delay);
     return;
   }
 
+  ESP_LOGD(TAG, "Notification enable request sent (handle 0x%04X, attempt %u)", this->tx_cccd_handle_,
+           this->notify_retry_attempts_);
+}
+
+void EnergomeraBleComponent::schedule_notification_retry_(uint32_t delay_ms) {
+  if (this->notify_retry_attempts_ >= 5) {
+    ESP_LOGW(TAG, "Notification enable retries exhausted; giving up");
+    this->cccd_write_pending_ = false;
+    return;
+  }
   this->cccd_write_pending_ = true;
-  ESP_LOGD(TAG, "Notification enable request sent (handle 0x%04X)", this->tx_cccd_handle_);
+  this->set_timeout("cccd_retry", delay_ms, [this]() {
+    this->cccd_write_pending_ = false;
+    this->enable_notifications_if_needed_();
+  });
 }
 
 void EnergomeraBleComponent::prepare_et0pe_command_() {
@@ -625,6 +652,8 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->tx_fragment_started_ = false;
       this->tx_sequence_counter_ = 0;
       this->mtu_ = 23;
+      this->notify_retry_attempts_ = 0;
+      this->cancel_timeout("cccd_retry");
       std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
       this->pending_response_handles_.clear();
       this->response_buffer_.clear();
@@ -780,6 +809,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->cccd_write_pending_ = false;
       if (param->write.status == ESP_GATT_OK) {
         this->notifications_enabled_ = true;
+        this->notify_retry_attempts_ = 0;
         ESP_LOGD(TAG, "Notifications enabled on handle 0x%04X", param->write.handle);
         this->try_send_pending_command_();
       } else {
@@ -787,11 +817,11 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         if (param->write.status == ESP_GATT_INSUF_AUTHENTICATION ||
             param->write.status == ESP_GATT_INSUF_AUTHORIZATION ||
             param->write.status == ESP_GATT_INSUF_ENCRYPTION) {
-          this->cccd_write_pending_ = true;
-          this->set_timeout("cccd_retry", 200, [this]() {
-            this->cccd_write_pending_ = false;
-            this->enable_notifications_if_needed_();
-          });
+          uint32_t attempt = this->notify_retry_attempts_ == 0 ? 1 : this->notify_retry_attempts_;
+          this->schedule_notification_retry_(300 + 200 * attempt);
+        } else if (this->notify_retry_attempts_ < 5) {
+          uint32_t attempt = this->notify_retry_attempts_ == 0 ? 1 : this->notify_retry_attempts_;
+          this->schedule_notification_retry_(400 + 200 * attempt);
         }
       }
       break;
@@ -814,6 +844,8 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->tx_fragment_started_ = false;
       this->tx_sequence_counter_ = 0;
       this->mtu_ = 23;
+      this->notify_retry_attempts_ = 0;
+      this->cancel_timeout("cccd_retry");
       std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
       this->pending_response_handles_.clear();
       this->response_buffer_.clear();
@@ -855,6 +887,7 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
         break;
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGI(TAG, "Pairing completed successfully");
+        this->enable_notifications_if_needed_();
         if (!this->version_reported_)
           this->request_firmware_version_();
       } else {

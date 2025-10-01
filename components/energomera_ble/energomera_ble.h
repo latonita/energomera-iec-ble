@@ -59,6 +59,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void finalize_command_response_();
   void handle_notification_(const esp_ble_gattc_cb_param_t::gattc_notify_evt_param &param);
   uint16_t get_max_payload_() const;
+  void schedule_notification_retry_(uint32_t delay_ms);
 
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override;
@@ -89,6 +90,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   uint8_t tx_sequence_counter_{0};
   bool tx_fragment_started_{false};
   uint16_t mtu_{23};
+  uint8_t notify_retry_attempts_{0};
   std::vector<uint8_t> tx_message_remaining_;
   std::vector<uint16_t> pending_response_handles_;
   std::vector<uint8_t> response_buffer_;
