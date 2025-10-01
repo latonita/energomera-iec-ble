@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <esp_gatt_defs.h>
 #include <esp_heap_caps.h>
 
 namespace esphome {
@@ -181,7 +182,7 @@ void EnergomeraBleComponent::request_firmware_version_() {
   }
 
   esp_err_t err = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                          this->version_char_handle_, ESP_GATT_AUTH_REQ_NONE);
+                                          this->version_char_handle_, ESP_GATT_AUTH_REQ_MITM);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to request firmware version read: %d", err);
     return;
@@ -357,7 +358,7 @@ void EnergomeraBleComponent::enable_notifications_if_needed_() {
   uint16_t notify_en = 0x0001;
   auto err = esp_ble_gattc_write_char_descr(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
                                             this->tx_cccd_handle_, sizeof(notify_en), (uint8_t *) &notify_en,
-                                            ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+                                            ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_MITM);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to enable notifications on handle 0x%04X: %d", this->tx_cccd_handle_, err);
     return;
@@ -453,7 +454,7 @@ bool EnergomeraBleComponent::send_next_fragment_() {
 
   esp_err_t status = esp_ble_gattc_write_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
                                               this->tx_char_handle_, packet.size(), packet.data(),
-                                              ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
+                                              ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_MITM);
   if (status != ESP_OK) {
     ESP_LOGW(TAG, "esp_ble_gattc_write_char failed: %d", status);
     return false;
@@ -479,7 +480,9 @@ bool EnergomeraBleComponent::send_next_fragment_() {
 }
 
 void EnergomeraBleComponent::start_response_sequence_(uint8_t slot_count) {
-  uint8_t count = slot_count;
+  uint8_t count = slot_count + 1;  // device expects slots 0..need_read
+  if (count == 0)
+    count = 1;
   if (count > this->response_char_handles_.size())
     count = this->response_char_handles_.size();
 
@@ -514,7 +517,7 @@ void EnergomeraBleComponent::issue_next_response_read_() {
 
   this->current_response_handle_ = this->pending_response_handles_.front();
   esp_err_t status = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                             this->current_response_handle_, ESP_GATT_AUTH_REQ_NONE);
+                                             this->current_response_handle_, ESP_GATT_AUTH_REQ_MITM);
   if (status != ESP_OK) {
     ESP_LOGW(TAG, "Failed to request response read (handle 0x%04X): %d", this->current_response_handle_, status);
     this->pending_response_handles_.clear();
@@ -773,6 +776,11 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         this->try_send_pending_command_();
       } else {
         ESP_LOGW(TAG, "Failed to enable notifications: %d", param->write.status);
+        if (param->write.status == ESP_GATT_INSUF_AUTHENTICATION ||
+            param->write.status == ESP_GATT_INSUF_AUTHORIZATION ||
+            param->write.status == ESP_GATT_INSUF_ENCRYPTION) {
+          this->set_timeout("cccd_retry", 200, [this]() { this->enable_notifications_if_needed_(); });
+        }
       }
       break;
     }
