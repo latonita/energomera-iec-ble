@@ -400,11 +400,13 @@ void EnergomeraBleComponent::try_send_pending_command_() {
   ESP_LOGI(TAG, "Sending ET0PE command (%u bytes payload)", (unsigned) this->tx_message_remaining_.size());
   this->command_pending_ = false;
   this->command_inflight_ = true;
+  this->command_complete_ = false;
 
   if (!this->send_next_fragment_()) {
     ESP_LOGW(TAG, "Failed to send first command fragment");
     this->command_inflight_ = false;
     this->command_pending_ = true;
+    this->command_complete_ = false;
   }
 }
 
@@ -477,14 +479,15 @@ bool EnergomeraBleComponent::send_next_fragment_() {
 }
 
 void EnergomeraBleComponent::start_response_sequence_(uint8_t slot_count) {
-  if (slot_count >= this->response_char_handles_.size())
-    slot_count = this->response_char_handles_.size() - 1;
+  uint8_t count = slot_count;
+  if (count > this->response_char_handles_.size())
+    count = this->response_char_handles_.size();
 
   this->pending_response_handles_.clear();
   this->response_buffer_.clear();
   this->response_in_progress_ = true;
 
-  for (uint8_t idx = 0; idx <= slot_count; idx++) {
+  for (uint8_t idx = 0; idx < count; idx++) {
     uint16_t handle = this->response_char_handles_[idx];
     if (handle == 0) {
       ESP_LOGW(TAG, "Response characteristic index %u not resolved", idx);
@@ -520,7 +523,7 @@ void EnergomeraBleComponent::issue_next_response_read_() {
 }
 
 void EnergomeraBleComponent::handle_command_read_(
-    const esp_ble_gattc_cb_param_t::gattc_read_evt_param &param) {
+    const esp_ble_gattc_cb_param_t::gattc_read_char_evt_param &param) {
   if (param.status != ESP_GATT_OK) {
     ESP_LOGW(TAG, "Response read failed (handle 0x%04X): %d", param.handle, param.status);
     this->pending_response_handles_.clear();
@@ -565,7 +568,7 @@ void EnergomeraBleComponent::finalize_command_response_() {
     char buf[4];
     snprintf(buf, sizeof(buf), "%02X ", byte);
     hex.append(buf);
-    ascii.push_back(std::isprint(byte) ? static_cast<char>(byte) : '.');
+    ascii.push_back(std::isprint(static_cast<unsigned char>(byte)) ? static_cast<char>(byte) : '.');
   }
 
   ESP_LOGI(TAG, "Response payload (%u bytes): %s", (unsigned) this->response_buffer_.size(), hex.c_str());
@@ -634,11 +637,6 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         ESP_LOGW(TAG, "Failed to open GATT connection: status=%d", param->open.status);
       } else {
         ESP_LOGD(TAG, "GATT connection open (conn_id=%d)", param->open.conn_id);
-        esp_err_t err =
-            esp_ble_gattc_config_mtu(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), 247);
-        if (err != ESP_OK) {
-          ESP_LOGW(TAG, "Failed to request MTU change: %d", err);
-        }
       }
       break;
     }
@@ -715,12 +713,14 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         if (param->read.status != ESP_GATT_OK) {
           ESP_LOGW(TAG, "Firmware version read failed: %d", param->read.status);
           this->command_pending_ = true;
+          this->command_complete_ = false;
           this->try_send_pending_command_();
           break;
         }
         if (param->read.value_len == 0) {
           ESP_LOGW(TAG, "Firmware version characteristic returned empty value");
           this->command_pending_ = true;
+          this->command_complete_ = false;
           this->try_send_pending_command_();
           break;
         }
@@ -741,6 +741,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         ESP_LOGI(TAG, "Meter firmware version: %s", version.c_str());
         this->version_reported_ = true;
         this->command_pending_ = true;
+        this->command_complete_ = false;
         this->enable_notifications_if_needed_();
         this->try_send_pending_command_();
         break;

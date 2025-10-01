@@ -55,7 +55,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   bool send_next_fragment_();
   void start_response_sequence_(uint8_t slot_count);
   void issue_next_response_read_();
-  void handle_command_read_(const esp_ble_gattc_cb_param_t::gattc_read_evt_param &param);
+  void handle_command_read_(const esp_ble_gattc_cb_param_t::gattc_read_char_evt_param &param);
   void finalize_command_response_();
   void handle_notification_(const esp_ble_gattc_cb_param_t::gattc_notify_evt_param &param);
   uint16_t get_max_payload_() const;
