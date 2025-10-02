@@ -365,9 +365,7 @@ void EnergomeraBleComponent::enable_notifications_() {
   esp_err_t status = esp_ble_gattc_register_for_notify(this->parent_->get_gattc_if(), this->parent_->get_remote_bda(),
                                                         this->tx_char_handle_);
   if (status != ESP_OK) {
-    ESP_LOGW(TAG, "esp_ble_gattc_register_for_notify failed: %d", status);
-    this->set_state_(FsmState::ERROR);
-    return;
+    ESP_LOGW(TAG, "esp_ble_gattc_register_for_notify failed: %d (continuing)", status);
   }
 
   uint16_t notify_en = 0x0001;
