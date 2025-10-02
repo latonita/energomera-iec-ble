@@ -49,18 +49,31 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void sync_address_from_parent_();
   bool resolve_characteristics_();
   bool resolve_tx_descriptors_();
-  void enable_notifications_if_needed_();
-  void prepare_et0pe_command_();
-  void try_send_pending_command_();
+
+  enum class FsmState : uint8_t {
+    IDLE,
+    RESOLVING,
+    REQUESTING_FIRMWARE,
+    WAITING_FIRMWARE,
+    ENABLING_NOTIFICATION,
+    WAITING_NOTIFICATION_ENABLE,
+    SENDING_COMMAND,
+    WAITING_NOTIFICATION,
+    READING_RESPONSE,
+    COMPLETE,
+    ERROR
+  };
+
+  void set_state_(FsmState state);
+  void enable_notifications_();
+  void prepare_watch_command_();
   bool send_next_fragment_();
-  void start_response_sequence_(uint8_t slot_count);
+  void begin_response_reads_(uint8_t slots);
   void issue_next_response_read_();
   void handle_command_read_(const esp_ble_gattc_cb_param_t::gattc_read_char_evt_param &param);
   void finalize_command_response_();
   void handle_notification_(const esp_ble_gattc_cb_param_t::gattc_notify_evt_param &param);
   uint16_t get_max_payload_() const;
-  void schedule_notification_retry_(uint32_t delay_ms);
-  void fallback_to_polling_reads_();
 
   void gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                            esp_ble_gattc_cb_param_t *param) override;
@@ -83,20 +96,14 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   bool service_search_requested_{false};
   bool characteristics_resolved_{false};
   bool notifications_enabled_{false};
-  bool cccd_write_pending_{false};
-  bool command_pending_{false};
-  bool command_inflight_{false};
-  bool command_complete_{false};
-  bool response_in_progress_{false};
   uint8_t tx_sequence_counter_{0};
   bool tx_fragment_started_{false};
   uint16_t mtu_{23};
-  uint8_t notify_retry_attempts_{0};
-  bool notification_failed_{false};
   std::vector<uint8_t> tx_message_remaining_;
-  std::vector<uint16_t> pending_response_handles_;
   std::vector<uint8_t> response_buffer_;
-  uint16_t current_response_handle_{0};
+  uint8_t expected_response_slots_{0};
+  uint8_t current_response_slot_{0};
+  FsmState state_{FsmState::IDLE};
   std::string pin_code_;
 };
 

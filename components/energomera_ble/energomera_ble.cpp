@@ -185,9 +185,11 @@ void EnergomeraBleComponent::request_firmware_version_() {
                                           this->version_char_handle_, ESP_GATT_AUTH_REQ_NONE);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to request firmware version read: %d", err);
+    this->set_state_(FsmState::ERROR);
     return;
   }
   this->version_requested_ = true;
+  this->set_state_(FsmState::WAITING_FIRMWARE);
   ESP_LOGD(TAG, "Firmware version read requested (handle 0x%04X)", this->version_char_handle_);
 }
 
@@ -342,31 +344,26 @@ bool EnergomeraBleComponent::resolve_tx_descriptors_() {
   return this->tx_cccd_handle_ != 0;
 }
 
-void EnergomeraBleComponent::enable_notifications_if_needed_() {
-  if (this->notifications_enabled_ || this->cccd_write_pending_ || this->notification_failed_)
+void EnergomeraBleComponent::set_state_(FsmState state) {
+  this->state_ = state;
+}
+
+void EnergomeraBleComponent::enable_notifications_() {
+  if (this->notifications_enabled_)
     return;
-  if (this->parent_ == nullptr || this->tx_char_handle_ == 0 || this->tx_cccd_handle_ == 0)
-    return;
-  if (this->notify_retry_attempts_ >= 5) {
-    ESP_LOGW(TAG, "Notification enable retries exhausted; switching to polling");
-    this->notification_failed_ = true;
-    this->fallback_to_polling_reads_();
+  if (this->parent_ == nullptr || this->tx_char_handle_ == 0 || this->tx_cccd_handle_ == 0) {
+    ESP_LOGW(TAG, "Cannot enable notifications: required handles missing");
+    this->set_state_(FsmState::ERROR);
     return;
   }
 
-  auto status = esp_ble_gattc_register_for_notify(this->parent_->get_gattc_if(), this->parent_->get_remote_bda(),
-                                                  this->tx_char_handle_);
+  esp_err_t status = esp_ble_gattc_register_for_notify(this->parent_->get_gattc_if(), this->parent_->get_remote_bda(),
+                                                        this->tx_char_handle_);
   if (status != ESP_OK) {
     ESP_LOGW(TAG, "esp_ble_gattc_register_for_notify failed: %d", status);
-    this->notify_retry_attempts_++;
-    uint32_t attempt = this->notify_retry_attempts_;
-    uint32_t delay = 300 + 200 * (attempt > 0 ? (attempt - 1U) : 0U);
-    this->schedule_notification_retry_(delay);
+    this->set_state_(FsmState::ERROR);
     return;
   }
-
-  this->cccd_write_pending_ = true;
-  this->notify_retry_attempts_++;
 
   uint16_t notify_en = 0x0001;
   auto err = esp_ble_gattc_write_char_descr(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
@@ -374,48 +371,15 @@ void EnergomeraBleComponent::enable_notifications_if_needed_() {
                                             ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to enable notifications on handle 0x%04X: %d", this->tx_cccd_handle_, err);
-    uint32_t attempt = this->notify_retry_attempts_;
-    uint32_t delay = 300 + 200 * (attempt > 0 ? (attempt - 1U) : 0U);
-    this->schedule_notification_retry_(delay);
+    this->set_state_(FsmState::ERROR);
     return;
   }
 
-  ESP_LOGD(TAG, "Notification enable request sent (handle 0x%04X, attempt %u)", this->tx_cccd_handle_,
-           this->notify_retry_attempts_);
+  ESP_LOGD(TAG, "Notification enable request sent (handle 0x%04X)", this->tx_cccd_handle_);
+  this->set_state_(FsmState::WAITING_NOTIFICATION_ENABLE);
 }
 
-void EnergomeraBleComponent::schedule_notification_retry_(uint32_t delay_ms) {
-  if (this->notify_retry_attempts_ >= 5) {
-    ESP_LOGW(TAG, "Notification enable retries exhausted; switching to polling");
-    this->cccd_write_pending_ = false;
-    this->notification_failed_ = true;
-    this->fallback_to_polling_reads_();
-    return;
-  }
-  this->cccd_write_pending_ = true;
-  this->set_timeout("cccd_retry", delay_ms, [this]() {
-    this->cccd_write_pending_ = false;
-    this->enable_notifications_if_needed_();
-  });
-}
-
-void EnergomeraBleComponent::fallback_to_polling_reads_() {
-  if (!this->notification_failed_)
-    return;
-  if (!this->command_pending_ && !this->command_inflight_) {
-    this->command_pending_ = true;
-  }
-  if (!this->response_in_progress_)
-    this->issue_next_response_read_();
-  this->set_timeout("polling_read_loop", 1500, [this]() {
-    if (this->notification_failed_) {
-      this->issue_next_response_read_();
-      this->fallback_to_polling_reads_();
-    }
-  });
-}
-
-void EnergomeraBleComponent::prepare_et0pe_command_() {
+void EnergomeraBleComponent::prepare_watch_command_() {
   static const uint8_t RAW_COMMAND[] = {0x2F, 0x3F, 0x21, 0x01, 0x52, 0x31, 0x02, 0x45,
                                         0x54, 0x30, 0x50, 0x45, 0x28, 0x29, 0x03, 0x00};
   this->tx_message_remaining_.assign(RAW_COMMAND, RAW_COMMAND + sizeof(RAW_COMMAND));
@@ -426,37 +390,6 @@ void EnergomeraBleComponent::prepare_et0pe_command_() {
   this->tx_sequence_counter_ = 0;
 }
 
-void EnergomeraBleComponent::try_send_pending_command_() {
-  if (!this->command_pending_ || this->command_inflight_ || this->command_complete_)
-    return;
-  if (!this->notifications_enabled_) {
-    ESP_LOGD(TAG, "Notifications not yet enabled; deferring command send");
-    return;
-  }
-  if (this->parent_ == nullptr || this->tx_char_handle_ == 0)
-    return;
-
-  if (this->tx_message_remaining_.empty())
-    this->prepare_et0pe_command_();
-
-  if (this->tx_message_remaining_.empty()) {
-    ESP_LOGW(TAG, "Command payload is empty, nothing to send");
-    this->command_pending_ = false;
-    return;
-  }
-
-  ESP_LOGI(TAG, "Sending ET0PE command (%u bytes payload)", (unsigned) this->tx_message_remaining_.size());
-  this->command_pending_ = false;
-  this->command_inflight_ = true;
-  this->command_complete_ = false;
-
-  if (!this->send_next_fragment_()) {
-    ESP_LOGW(TAG, "Failed to send first command fragment");
-    this->command_inflight_ = false;
-    this->command_pending_ = true;
-    this->command_complete_ = false;
-  }
-}
 
 uint16_t EnergomeraBleComponent::get_max_payload_() const {
   if (this->mtu_ <= 4)
@@ -521,54 +454,47 @@ bool EnergomeraBleComponent::send_next_fragment_() {
 
   if (more_after_this) {
     this->parent_->run_later([this]() { this->send_next_fragment_(); });
+  } else {
+    this->set_state_(FsmState::WAITING_NOTIFICATION);
   }
 
   return true;
 }
 
-void EnergomeraBleComponent::start_response_sequence_(uint8_t slot_count) {
-  uint8_t count = slot_count + 1;  // device expects slots 0..need_read
-  if (count == 0)
-    count = 1;
-  if (count > this->response_char_handles_.size())
-    count = this->response_char_handles_.size();
+void EnergomeraBleComponent::begin_response_reads_(uint8_t slot_count) {
+  uint8_t slots = slot_count + 1;
+  if (slots == 0)
+    slots = 1;
+  if (slots > this->response_char_handles_.size())
+    slots = this->response_char_handles_.size();
 
-  this->pending_response_handles_.clear();
+  this->expected_response_slots_ = slots;
+  this->current_response_slot_ = 0;
   this->response_buffer_.clear();
-  this->response_in_progress_ = true;
 
-  for (uint8_t idx = 0; idx < count; idx++) {
-    uint16_t handle = this->response_char_handles_[idx];
-    if (handle == 0) {
-      ESP_LOGW(TAG, "Response characteristic index %u not resolved", idx);
-      continue;
-    }
-    this->pending_response_handles_.push_back(handle);
-  }
-
-  if (this->pending_response_handles_.empty()) {
-    ESP_LOGW(TAG, "No response handles available to read");
-    this->response_in_progress_ = false;
-    this->command_inflight_ = false;
-    return;
-  }
-
+  this->set_state_(FsmState::READING_RESPONSE);
   this->issue_next_response_read_();
 }
 
 void EnergomeraBleComponent::issue_next_response_read_() {
-  if (this->pending_response_handles_.empty()) {
+  if (this->current_response_slot_ >= this->expected_response_slots_) {
     this->finalize_command_response_();
     return;
   }
 
-  this->current_response_handle_ = this->pending_response_handles_.front();
-  esp_err_t status = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                             this->current_response_handle_, ESP_GATT_AUTH_REQ_NONE);
+  uint16_t handle = this->response_char_handles_[this->current_response_slot_];
+  if (handle == 0) {
+    ESP_LOGW(TAG, "Response characteristic index %u not resolved", this->current_response_slot_);
+    this->current_response_slot_++;
+    this->issue_next_response_read_();
+    return;
+  }
+
+  esp_err_t status = esp_ble_gattc_read_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), handle,
+                                             ESP_GATT_AUTH_REQ_NONE);
   if (status != ESP_OK) {
-    ESP_LOGW(TAG, "Failed to request response read (handle 0x%04X): %d", this->current_response_handle_, status);
-    this->pending_response_handles_.clear();
-    this->finalize_command_response_();
+    ESP_LOGW(TAG, "Failed to request response read (handle 0x%04X): %d", handle, status);
+    this->set_state_(FsmState::ERROR);
   }
 }
 
@@ -576,8 +502,7 @@ void EnergomeraBleComponent::handle_command_read_(
     const esp_ble_gattc_cb_param_t::gattc_read_char_evt_param &param) {
   if (param.status != ESP_GATT_OK) {
     ESP_LOGW(TAG, "Response read failed (handle 0x%04X): %d", param.handle, param.status);
-    this->pending_response_handles_.clear();
-    this->finalize_command_response_();
+    this->set_state_(FsmState::ERROR);
     return;
   }
 
@@ -585,25 +510,12 @@ void EnergomeraBleComponent::handle_command_read_(
     this->response_buffer_.push_back(param.value[i] & 0x7F);
   }
 
-  if (!this->pending_response_handles_.empty() && this->pending_response_handles_.front() == param.handle) {
-    this->pending_response_handles_.erase(this->pending_response_handles_.begin());
-  } else {
-    auto it = std::find(this->pending_response_handles_.begin(), this->pending_response_handles_.end(), param.handle);
-    if (it != this->pending_response_handles_.end())
-      this->pending_response_handles_.erase(it);
-  }
-
+  this->current_response_slot_++;
   this->issue_next_response_read_();
 }
 
 void EnergomeraBleComponent::finalize_command_response_() {
-  if (!this->response_in_progress_)
-    return;
-
-  this->response_in_progress_ = false;
-  this->command_inflight_ = false;
-  this->command_complete_ = true;
-  this->pending_response_handles_.clear();
+  this->set_state_(FsmState::COMPLETE);
 
   if (this->response_buffer_.empty()) {
     ESP_LOGW(TAG, "No response payload received");
@@ -623,6 +535,8 @@ void EnergomeraBleComponent::finalize_command_response_() {
 
   ESP_LOGI(TAG, "Response payload (%u bytes): %s", (unsigned) this->response_buffer_.size(), hex.c_str());
   ESP_LOGI(TAG, "Response ASCII: %s", ascii.c_str());
+  this->response_buffer_.clear();
+  this->set_state_(FsmState::WAITING_NOTIFICATION);
 }
 
 void EnergomeraBleComponent::handle_notification_(
@@ -644,7 +558,7 @@ void EnergomeraBleComponent::handle_notification_(
 
   uint8_t slot_count = param.value[0];
   ESP_LOGD(TAG, "Notification received (need_read=%u): %s", slot_count, hex.c_str());
-  this->start_response_sequence_(slot_count);
+  this->begin_response_reads_(slot_count);
 }
 
 void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
@@ -664,20 +578,15 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->service_search_requested_ = false;
       this->characteristics_resolved_ = false;
       this->notifications_enabled_ = false;
-      this->cccd_write_pending_ = false;
-      this->command_pending_ = false;
-      this->command_inflight_ = false;
-      this->command_complete_ = false;
-      this->response_in_progress_ = false;
       this->tx_fragment_started_ = false;
       this->tx_sequence_counter_ = 0;
       this->mtu_ = 23;
-      this->notify_retry_attempts_ = 0;
-      this->cancel_timeout("cccd_retry");
-      std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
-      this->pending_response_handles_.clear();
-      this->response_buffer_.clear();
       this->tx_message_remaining_.clear();
+      this->response_buffer_.clear();
+      this->expected_response_slots_ = 0;
+      this->current_response_slot_ = 0;
+      std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
+      this->set_state_(FsmState::RESOLVING);
       this->sync_address_from_parent_();
       this->initiate_pairing_(param->connect.remote_bda);
       break;
@@ -704,23 +613,6 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
     case ESP_GATTC_SEARCH_RES_EVT: {
       if (param->search_res.conn_id != this->parent_->get_conn_id())
         break;
-      const auto &uuid = param->search_res.srvc_id.uuid;
-      if (uuid.len == ESP_UUID_LEN_16) {
-        ESP_LOGD(TAG, "Service discovered: uuid16=0x%04X handles=0x%04X-0x%04X", uuid.uuid.uuid16,
-                 param->search_res.start_handle, param->search_res.end_handle);
-      } else if (uuid.len == ESP_UUID_LEN_32) {
-        ESP_LOGD(TAG, "Service discovered: uuid32=0x%08X handles=0x%04X-0x%04X", uuid.uuid.uuid32,
-                 param->search_res.start_handle, param->search_res.end_handle);
-      } else if (uuid.len == ESP_UUID_LEN_128) {
-        char buf[37];
-        snprintf(buf, sizeof(buf), "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
-                 uuid.uuid.uuid128[15], uuid.uuid.uuid128[14], uuid.uuid.uuid128[13], uuid.uuid.uuid128[12],
-                 uuid.uuid.uuid128[11], uuid.uuid.uuid128[10], uuid.uuid.uuid128[9], uuid.uuid.uuid128[8],
-                 uuid.uuid.uuid128[7], uuid.uuid.uuid128[6], uuid.uuid.uuid128[5], uuid.uuid.uuid128[4],
-                 uuid.uuid.uuid128[3], uuid.uuid.uuid128[2], uuid.uuid.uuid128[1], uuid.uuid.uuid128[0]);
-        ESP_LOGD(TAG, "Service discovered: uuid128=%s handles=0x%04X-0x%04X", buf, param->search_res.start_handle,
-                 param->search_res.end_handle);
-      }
       if (this->match_service_uuid_(param->search_res.srvc_id.uuid)) {
         this->service_start_handle_ = param->search_res.start_handle;
         this->service_end_handle_ = param->search_res.end_handle;
@@ -738,61 +630,35 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
           esp_bt_uuid_t svc_uuid{};
           svc_uuid.len = ESP_UUID_LEN_16;
           svc_uuid.uuid.uuid16 = 0x0100;
-          esp_err_t status =
-              esp_ble_gattc_search_service(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), &svc_uuid);
-          if (status == ESP_OK) {
+          if (esp_ble_gattc_search_service(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), &svc_uuid) ==
+              ESP_OK) {
             this->service_search_requested_ = true;
             ESP_LOGW(TAG, "Energomera service not found; requesting targeted search");
             break;
           }
-          ESP_LOGW(TAG, "Energomera service search request failed: %d", status);
-        } else {
-          ESP_LOGW(TAG, "Energomera service not found during discovery");
         }
+        ESP_LOGW(TAG, "Energomera service not found during discovery");
+        this->set_state_(FsmState::ERROR);
         break;
       }
-      if (this->resolve_characteristics_())
-        this->enable_notifications_if_needed_();
+      if (!this->resolve_characteristics_()) {
+        this->set_state_(FsmState::ERROR);
+        break;
+      }
+      this->set_state_(FsmState::REQUESTING_FIRMWARE);
       this->request_firmware_version_();
       break;
     }
     case ESP_GATTC_READ_CHAR_EVT: {
       if (param->read.conn_id != this->parent_->get_conn_id())
         break;
-      uint16_t handle = param->read.handle;
-      if (handle == this->version_char_handle_) {
+      if (param->read.handle == this->version_char_handle_) {
         this->version_requested_ = false;
-        if (param->read.status != ESP_GATT_OK) {
+        if (param->read.status != ESP_GATT_OK || param->read.value_len == 0) {
           ESP_LOGW(TAG, "Firmware version read failed: %d", param->read.status);
-          this->command_pending_ = true;
-          this->command_complete_ = false;
-          this->set_timeout("fw_retry", 300, [this]() {
-            if (!this->version_reported_)
-              this->request_firmware_version_();
-          });
-          this->try_send_pending_command_();
+          this->set_state_(FsmState::ERROR);
           break;
         }
-        if (param->read.value_len == 0) {
-          ESP_LOGW(TAG, "Firmware version characteristic returned empty value");
-          this->command_pending_ = true;
-          this->command_complete_ = false;
-          this->set_timeout("fw_retry_empty", 300, [this]() {
-            if (!this->version_reported_)
-              this->request_firmware_version_();
-          });
-          this->try_send_pending_command_();
-          break;
-        }
-        std::string hex_dump;
-        hex_dump.reserve(param->read.value_len * 3);
-        for (uint16_t i = 0; i < param->read.value_len; i++) {
-          char buf[4];
-          snprintf(buf, sizeof(buf), "%02X ", param->read.value[i]);
-          hex_dump.append(buf);
-        }
-        ESP_LOGD(TAG, "Firmware characteristic raw (%u bytes): %s", param->read.value_len, hex_dump.c_str());
-
         std::string version(reinterpret_cast<const char *>(param->read.value),
                             reinterpret_cast<const char *>(param->read.value) + param->read.value_len);
         auto nul_pos = version.find('\0');
@@ -800,25 +666,12 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
           version.resize(nul_pos);
         ESP_LOGI(TAG, "Meter firmware version: %s", version.c_str());
         this->version_reported_ = true;
-        this->command_pending_ = true;
-        this->command_complete_ = false;
-        this->enable_notifications_if_needed_();
-        this->try_send_pending_command_();
+        this->set_state_(FsmState::ENABLING_NOTIFICATION);
+        this->enable_notifications_();
         break;
       }
-
-      if (!this->pending_response_handles_.empty() ||
-          std::find(this->response_char_handles_.begin(), this->response_char_handles_.end(), handle) !=
-              this->response_char_handles_.end()) {
+      if (this->state_ == FsmState::READING_RESPONSE)
         this->handle_command_read_(param->read);
-      }
-      break;
-    }
-    case ESP_GATTC_NOTIFY_EVT: {
-      if (param->notify.conn_id != this->parent_->get_conn_id())
-        break;
-      if (param->notify.handle == this->tx_char_handle_)
-        this->handle_notification_(param->notify);
       break;
     }
     case ESP_GATTC_WRITE_DESCR_EVT: {
@@ -826,24 +679,30 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         break;
       if (param->write.handle != this->tx_cccd_handle_)
         break;
-      this->cccd_write_pending_ = false;
-      if (param->write.status == ESP_GATT_OK) {
-        this->notifications_enabled_ = true;
-        this->notify_retry_attempts_ = 0;
-        ESP_LOGD(TAG, "Notifications enabled on handle 0x%04X", param->write.handle);
-        this->try_send_pending_command_();
-      } else {
+      if (param->write.status != ESP_GATT_OK) {
         ESP_LOGW(TAG, "Failed to enable notifications: %d", param->write.status);
-        if (param->write.status == ESP_GATT_INSUF_AUTHENTICATION ||
-            param->write.status == ESP_GATT_INSUF_AUTHORIZATION ||
-            param->write.status == ESP_GATT_INSUF_ENCRYPTION) {
-          uint32_t attempt = this->notify_retry_attempts_ == 0 ? 1 : this->notify_retry_attempts_;
-          this->schedule_notification_retry_(300 + 200 * attempt);
-        } else if (this->notify_retry_attempts_ < 5) {
-          uint32_t attempt = this->notify_retry_attempts_ == 0 ? 1 : this->notify_retry_attempts_;
-          this->schedule_notification_retry_(400 + 200 * attempt);
-        }
+        this->set_state_(FsmState::ERROR);
+        break;
       }
+      this->notifications_enabled_ = true;
+      ESP_LOGD(TAG, "Notifications enabled on handle 0x%04X", param->write.handle);
+      this->prepare_watch_command_();
+      if (this->tx_message_remaining_.empty()) {
+        ESP_LOGW(TAG, "No command payload prepared");
+        this->set_state_(FsmState::ERROR);
+        break;
+      }
+      ESP_LOGI(TAG, "Sending watch command (%u bytes payload)", (unsigned) this->tx_message_remaining_.size());
+      this->set_state_(FsmState::SENDING_COMMAND);
+      if (!this->send_next_fragment_())
+        this->set_state_(FsmState::ERROR);
+      break;
+    }
+    case ESP_GATTC_NOTIFY_EVT: {
+      if (param->notify.conn_id != this->parent_->get_conn_id())
+        break;
+      if (param->notify.handle == this->tx_char_handle_ && this->state_ == FsmState::WAITING_NOTIFICATION)
+        this->handle_notification_(param->notify);
       break;
     }
     case ESP_GATTC_DISCONNECT_EVT: {
@@ -856,22 +715,15 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->tx_cccd_handle_ = 0;
       this->characteristics_resolved_ = false;
       this->notifications_enabled_ = false;
-      this->cccd_write_pending_ = false;
-      this->command_pending_ = false;
-      this->command_inflight_ = false;
-      this->command_complete_ = false;
-      this->response_in_progress_ = false;
       this->tx_fragment_started_ = false;
       this->tx_sequence_counter_ = 0;
       this->mtu_ = 23;
-      this->notify_retry_attempts_ = 0;
-      this->notification_failed_ = false;
-      this->cancel_timeout("cccd_retry");
-      this->cancel_timeout("polling_read_loop");
-      std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
-      this->pending_response_handles_.clear();
-      this->response_buffer_.clear();
       this->tx_message_remaining_.clear();
+      this->response_buffer_.clear();
+      this->expected_response_slots_ = 0;
+      this->current_response_slot_ = 0;
+      std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
+      this->set_state_(FsmState::IDLE);
       break;
     }
     default:
@@ -909,7 +761,6 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
         break;
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGI(TAG, "Pairing completed successfully");
-        this->enable_notifications_if_needed_();
         if (!this->version_reported_)
           this->request_firmware_version_();
       } else {
