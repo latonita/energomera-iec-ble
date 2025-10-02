@@ -659,6 +659,15 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
           this->set_state_(FsmState::ERROR);
           break;
         }
+        std::string hex_dump;
+        hex_dump.reserve(param->read.value_len * 3);
+        for (uint16_t i = 0; i < param->read.value_len; i++) {
+          char buf[4];
+          snprintf(buf, sizeof(buf), "%02X ", param->read.value[i]);
+          hex_dump.append(buf);
+        }
+        ESP_LOGD(TAG, "Firmware characteristic raw (%u bytes): %s", param->read.value_len, hex_dump.c_str());
+
         std::string version(reinterpret_cast<const char *>(param->read.value),
                             reinterpret_cast<const char *>(param->read.value) + param->read.value_len);
         auto nul_pos = version.find('\0');
@@ -667,7 +676,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
         ESP_LOGI(TAG, "Meter firmware version: %s", version.c_str());
         this->version_reported_ = true;
         this->set_state_(FsmState::ENABLING_NOTIFICATION);
-        this->enable_notifications_();
+        this->set_timeout("enable_notify", 500, [this]() { this->enable_notifications_(); });
         break;
       }
       if (this->state_ == FsmState::READING_RESPONSE)
@@ -722,6 +731,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->response_buffer_.clear();
       this->expected_response_slots_ = 0;
       this->current_response_slot_ = 0;
+      this->cancel_timeout("enable_notify");
       std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
       this->set_state_(FsmState::IDLE);
       break;
