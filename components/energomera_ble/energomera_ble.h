@@ -104,6 +104,7 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   uint8_t expected_response_slots_{0};
   uint8_t current_response_slot_{0};
   FsmState state_{FsmState::IDLE};
+  bool link_encrypted_{false};
   std::string pin_code_;
 };
 

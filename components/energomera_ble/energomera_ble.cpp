@@ -351,6 +351,11 @@ void EnergomeraBleComponent::set_state_(FsmState state) {
 void EnergomeraBleComponent::enable_notifications_() {
   if (this->notifications_enabled_)
     return;
+  if (!this->link_encrypted_) {
+    ESP_LOGD(TAG, "Link not encrypted yet; deferring notification enable");
+    this->set_state_(FsmState::WAITING_NOTIFICATION_ENABLE);
+    return;
+  }
   if (this->parent_ == nullptr || this->tx_char_handle_ == 0 || this->tx_cccd_handle_ == 0) {
     ESP_LOGW(TAG, "Cannot enable notifications: required handles missing");
     this->set_state_(FsmState::ERROR);
@@ -368,7 +373,7 @@ void EnergomeraBleComponent::enable_notifications_() {
   uint16_t notify_en = 0x0001;
   auto err = esp_ble_gattc_write_char_descr(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
                                             this->tx_cccd_handle_, sizeof(notify_en), (uint8_t *) &notify_en,
-                                            ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+                                            ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_MITM);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to enable notifications on handle 0x%04X: %d", this->tx_cccd_handle_, err);
     this->set_state_(FsmState::ERROR);
@@ -568,6 +573,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       if (!this->parent_->check_addr(param->connect.remote_bda))
         break;
       ESP_LOGI(TAG, "GATT client connected");
+      this->link_encrypted_ = false;
       this->service_start_handle_ = 0;
       this->service_end_handle_ = 0;
       this->version_char_handle_ = 0;
@@ -718,6 +724,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       if (!this->parent_->check_addr(param->disconnect.remote_bda))
         break;
       ESP_LOGW(TAG, "GATT client disconnected: reason=0x%02X", param->disconnect.reason);
+      this->link_encrypted_ = false;
       this->version_requested_ = false;
       this->version_char_handle_ = 0;
       this->tx_char_handle_ = 0;
@@ -771,10 +778,14 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
         break;
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGI(TAG, "Pairing completed successfully");
+        this->link_encrypted_ = true;
         if (!this->version_reported_)
           this->request_firmware_version_();
+        else if (this->state_ == FsmState::WAITING_NOTIFICATION_ENABLE)
+          this->set_timeout("enable_notify", 100, [this]() { this->enable_notifications_(); });
       } else {
         ESP_LOGE(TAG, "Pairing failed, status=%d", param->ble_security.auth_cmpl.fail_reason);
+        this->link_encrypted_ = false;
       }
       break;
     default:
