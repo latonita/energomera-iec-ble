@@ -648,11 +648,11 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       if (this->passkey_ != 0) {
         ESP_LOGI(TAG, "Will initiate MITM pairing with PIN %06u", this->passkey_);
         
-        // Optional: Remove existing bond to force fresh pairing (uncomment for testing)
-        // ESP_LOGI(TAG, "Removing existing bond to force fresh pairing");
-        // esp_ble_remove_bond_device(remote_addr.data());
+        // Remove existing bond to force fresh pairing with PIN
+        ESP_LOGI(TAG, "Removing existing bond to force fresh pairing");
+        esp_ble_remove_bond_device(const_cast<uint8_t*>(remote_addr.data()));
         
-        this->set_timeout(500, [this, remote_addr]() {
+        this->set_timeout(100, [this, remote_addr]() {
           ESP_LOGI(TAG, "Initiating encrypted link with MITM protection");
           esp_err_t result = esp_ble_set_encryption(const_cast<uint8_t*>(remote_addr.data()), ESP_BLE_SEC_ENCRYPT_MITM);
           ESP_LOGI(TAG, "esp_ble_set_encryption result: %d", result);
