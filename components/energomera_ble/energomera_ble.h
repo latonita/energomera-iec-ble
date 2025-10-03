@@ -29,8 +29,8 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void update() override;
   void dump_config() override;
 
-  void set_pin_code(const std::string &pin_code) { this->pin_code_ = pin_code; }
-  void set_passkey(uint32_t passkey);
+  void set_passkey(uint32_t passkey) { this->passkey_ = passkey % 1000000U; };
+
   void set_meter_address(const std::string &address) { (void) address; }
   void set_receive_timeout_ms(uint32_t timeout) { (void) timeout; }
   void set_delay_between_requests_ms(uint32_t delay) { (void) delay; }
@@ -44,6 +44,8 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
 #endif
 
  protected:
+  void log_discovered_services_();
+
   void initiate_pairing_(const esp_bd_addr_t remote_bda);
   void request_firmware_version_();
   void sync_address_from_parent_();
@@ -61,7 +63,8 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
     WAITING_NOTIFICATION,
     READING_RESPONSE,
     COMPLETE,
-    ERROR
+    ERROR,
+    DISCONNECTED
   };
 
   void set_state_(FsmState state);
@@ -105,7 +108,11 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   uint8_t current_response_slot_{0};
   FsmState state_{FsmState::IDLE};
   bool link_encrypted_{false};
-  std::string pin_code_;
+  //  std::string pin_code_;
+
+  uint32_t passkey_{0};
+
+  bool services_logged_{false};
 };
 
 }  // namespace energomera_ble
