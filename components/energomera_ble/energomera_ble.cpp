@@ -106,11 +106,12 @@ void EnergomeraBleComponent::loop() {
     } break;
 
     case FsmState::RESOLVING: {
-      this->log_discovered_services_();
       this->set_state_(FsmState::REQUESTING_FIRMWARE);
     } break;
 
     case FsmState::REQUESTING_FIRMWARE: {
+      this->request_firmware_version_();
+      this->set_state_(FsmState::WAITING_FIRMWARE);
     } break;
 
     case FsmState::WAITING_FIRMWARE: {
@@ -634,7 +635,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->expected_response_slots_ = 0;
       this->current_response_slot_ = 0;
       std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
-      this->set_state_(FsmState::RESOLVING);
+      // this->set_state_(FsmState::RESOLVING);
       this->sync_address_from_parent_();
       // this->initiate_pairing_(param->connect.remote_bda);
 
@@ -693,6 +694,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       // this->node_state = esp32_ble_tracker::ClientState::ESTABLISHED;
       this->services_logged_ = false;  // Reset flag to log services on next update
       log_discovered_services_();
+      this->set_state_(FsmState::RESOLVING);
       // if (this->service_start_handle_ == 0) {
       //   if (!this->service_search_requested_) {
       //     esp_bt_uuid_t svc_uuid{};
@@ -720,35 +722,35 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
     case ESP_GATTC_READ_CHAR_EVT: {
       if (param->read.conn_id != this->parent_->get_conn_id())
         break;
-      // if (param->read.handle == this->version_char_handle_) {
-      //   this->version_requested_ = false;
-      //   if (param->read.status != ESP_GATT_OK || param->read.value_len == 0) {
-      //     ESP_LOGW(TAG, "Firmware version read failed: %d", param->read.status);
-      //     this->set_state_(FsmState::ERROR);
-      //     break;
-      //   }
-      //   std::string hex_dump;
-      //   hex_dump.reserve(param->read.value_len * 3);
-      //   for (uint16_t i = 0; i < param->read.value_len; i++) {
-      //     char buf[4];
-      //     snprintf(buf, sizeof(buf), "%02X ", param->read.value[i]);
-      //     hex_dump.append(buf);
-      //   }
-      //   ESP_LOGD(TAG, "Firmware characteristic raw (%u bytes): %s", param->read.value_len, hex_dump.c_str());
+      if (param->read.handle == this->version_char_handle_) {
+        this->version_requested_ = false;
+        if (param->read.status != ESP_GATT_OK || param->read.value_len == 0) {
+          ESP_LOGW(TAG, "Firmware version read failed: %d", param->read.status);
+          this->set_state_(FsmState::ERROR);
+          break;
+        }
+        std::string hex_dump;
+        hex_dump.reserve(param->read.value_len * 3);
+        for (uint16_t i = 0; i < param->read.value_len; i++) {
+          char buf[4];
+          snprintf(buf, sizeof(buf), "%02X ", param->read.value[i]);
+          hex_dump.append(buf);
+        }
+        ESP_LOGD(TAG, "Firmware characteristic raw (%u bytes): %s", param->read.value_len, hex_dump.c_str());
 
-      //   std::string version(reinterpret_cast<const char *>(param->read.value),
-      //                       reinterpret_cast<const char *>(param->read.value) + param->read.value_len);
-      //   auto nul_pos = version.find('\0');
-      //   if (nul_pos != std::string::npos)
-      //     version.resize(nul_pos);
-      //   ESP_LOGI(TAG, "Meter firmware version: %s", version.c_str());
-      //   this->version_reported_ = true;
-      //   this->set_state_(FsmState::ENABLING_NOTIFICATION);
-      //   this->set_timeout("enable_notify", 500, [this]() { this->enable_notifications_(); });
-      //   break;
-      // }
-      // if (this->state_ == FsmState::READING_RESPONSE)
-      //   this->handle_command_read_(param->read);
+        std::string version(reinterpret_cast<const char *>(param->read.value),
+                            reinterpret_cast<const char *>(param->read.value) + param->read.value_len);
+        auto nul_pos = version.find('\0');
+        if (nul_pos != std::string::npos)
+          version.resize(nul_pos);
+        ESP_LOGI(TAG, "Meter firmware version: %s", version.c_str());
+        this->version_reported_ = true;
+        this->set_state_(FsmState::ENABLING_NOTIFICATION);
+        this->set_timeout("enable_notify", 500, [this]() { this->enable_notifications_(); });
+        break;
+      }
+      if (this->state_ == FsmState::READING_RESPONSE)
+        this->handle_command_read_(param->read);
       break;
     }
     case ESP_GATTC_WRITE_DESCR_EVT: {
@@ -840,7 +842,7 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
         ESP_LOGI(TAG, "Pairing completed successfully");
         this->set_timeout(500, [this]() {
           this->link_encrypted_ = true;
-          this->set_state_(FsmState::RESOLVING);
+          // this->set_state_(FsmState::RESOLVING);
         });
 
         // if (!this->version_reported_)
@@ -906,6 +908,17 @@ void EnergomeraBleComponent::log_discovered_services_() {
     if (!energomera_service->parsed) {
       energomera_service->parse_characteristics();
     }
+
+    uint16_t start_handle = energomera_service->start_handle;
+    uint16_t end_handle = 0x004f;  // energomera_service->end_handle;
+    uint16_t offset = 0;
+    uint16_t count = 0;
+
+    esp_gatt_status_t status = esp_ble_gattc_get_attr_count(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                                            ESP_GATT_DB_CHARACTERISTIC, this->service_start_handle_,
+                                                            this->service_end_handle_, ESP_GATT_INVALID_HANDLE, &count);
+    ESP_LOGI(TAG, "get_all_char_count offset=%d, status=%d, count=%d", offset, status, count);
+
     for (auto *chr : energomera_service->characteristics) {
       ESP_LOGI(TAG, "    Characteristic: %s (handle: 0x%04X, props: 0x%02X)", chr->uuid.to_string().c_str(),
                chr->handle, chr->properties);
@@ -924,14 +937,11 @@ void EnergomeraBleComponent::log_discovered_services_() {
       ESP_LOGI(TAG, "    TX Characteristic (%s) NOT FOUND", ENERGOMERA_TX_UUID.to_string().c_str());
     }
 
-    uint16_t start_handle = energomera_service->start_handle;
-    uint16_t end_handle = 0x004f;  // energomera_service->end_handle;
-    uint16_t offset = 0;
     esp_gattc_char_elem_t result;
-    esp_gatt_status_t status;
+    // esp_gatt_status_t status;
 
     while (true) {
-      uint16_t count = 1;
+      count = 1;
       status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), start_handle,
                                           end_handle, &result, &count, offset);
 
@@ -963,7 +973,7 @@ void EnergomeraBleComponent::log_discovered_services_() {
     }
 
     // try another way
-    uint16_t count = 1;
+    count = 1;
     status = esp_ble_gattc_get_char_by_uuid(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), start_handle,
                                             end_handle, ENERGOMERA_VERSION_UUID.get_uuid(), &result, &count);
     ESP_LOGI(TAG, "get_char_by_uuid status=%d, count=%d", status, count);
