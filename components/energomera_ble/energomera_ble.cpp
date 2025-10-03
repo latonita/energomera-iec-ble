@@ -842,23 +842,33 @@ void EnergomeraBleComponent::log_discovered_services_() {
   static const esphome::esp32_ble_tracker::ESPBTUUID ENERGOMERA_TX_UUID =
       esphome::esp32_ble_tracker::ESPBTUUID::from_raw("b91b0105-8bef-45e2-97c3-1cd862d914df");
 
-  static const esphome::esp32_ble_tracker::ESPBTUUID svs[] = {ENERGOMERA_SERVICE_UUID, ENERGOMERA_VERSION_UUID,
-                                                              ENERGOMERA_TX_UUID};
-  for (auto &svc : svs) {
-    auto *energomera_service = this->parent_->get_service(svc);
-    if (energomera_service != nullptr) {
-      ESP_LOGI(TAG, "  Energomera Service (%s): handles 0x%04X-0x%04X", svc.to_string().c_str(),
-               energomera_service->start_handle, energomera_service->end_handle);
-      if (!energomera_service->parsed) {
-        energomera_service->parse_characteristics();
-      }
-      for (auto *chr : energomera_service->characteristics) {
-        ESP_LOGI(TAG, "    Characteristic: %s (handle: 0x%04X, props: 0x%02X)", chr->uuid.to_string().c_str(),
-                 chr->handle, chr->properties);
-      }
-    } else {
-      ESP_LOGI(TAG, "  Energomera Service (%s): NOT FOUND", svc.to_string().c_str());
+  auto *energomera_service = this->parent_->get_service(ENERGOMERA_SERVICE_UUID);
+  if (energomera_service != nullptr) {
+    ESP_LOGI(TAG, "  Energomera Service (%s): handles 0x%04X-0x%04X", ENERGOMERA_SERVICE_UUID.to_string().c_str(),
+             energomera_service->start_handle, energomera_service->end_handle);
+    if (!energomera_service->parsed) {
+      energomera_service->parse_characteristics();
     }
+    for (auto *chr : energomera_service->characteristics) {
+      ESP_LOGI(TAG, "    Characteristic: %s (handle: 0x%04X, props: 0x%02X)", chr->uuid.to_string().c_str(),
+               chr->handle, chr->properties);
+    }
+
+    auto *version_char = energomera_service->get_characteristic(ENERGOMERA_VERSION_UUID);
+    if (version_char != nullptr) {
+      ESP_LOGI(TAG, "    Version Characteristic found at handle 0x%04X", version_char->handle);
+    } else {
+      ESP_LOGI(TAG, "    Version Characteristic (%s) NOT FOUND", ENERGOMERA_VERSION_UUID.to_string().c_str());
+    }
+    auto *tx_char = energomera_service->get_characteristic(ENERGOMERA_TX_UUID);
+    if (tx_char != nullptr) {
+      ESP_LOGI(TAG, "    TX Characteristic found at handle 0x%04X", tx_char->handle);
+    } else {
+      ESP_LOGI(TAG, "    TX Characteristic (%s) NOT FOUND", ENERGOMERA_TX_UUID.to_string().c_str());
+    }
+
+  } else {
+    ESP_LOGI(TAG, "  Energomera Service (%s): NOT FOUND", ENERGOMERA_SERVICE_UUID.to_string().c_str());
   }
 
   ESP_LOGI(TAG, "=== End of Services ===");
