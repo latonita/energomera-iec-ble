@@ -72,27 +72,7 @@ void EnergomeraBleComponent::setup() {
 
   this->sync_address_from_parent_();
 
-  // Configure security parameters for PIN-based pairing
-  // Try different combinations to see what the device supports
-  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;  // Secure Connections with MITM and bonding
-  esp_ble_io_cap_t iocap = ESP_IO_CAP_KBDISP;                  // Keyboard + Display (can input AND display PIN)
-  uint8_t key_size = 16;
-  uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-  uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-  uint8_t oob_support = ESP_BLE_OOB_DISABLE;
-
-  ESP_LOGI(TAG, "Setting BLE security parameters: auth_req=0x%02X, iocap=%d, passkey=%06u", 
-           auth_req, iocap, this->passkey_);
-  
-  esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_OOB_SUPPORT, &oob_support, sizeof(oob_support));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &resp_key, sizeof(resp_key));
-  
-  // Also set a static passkey for consistent pairing
-  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &this->passkey_, sizeof(this->passkey_));
+  ESP_LOGI(TAG, "Energomera BLE setup complete - security will be configured on connect");
 }
 
 void EnergomeraBleComponent::loop() {
@@ -624,7 +604,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
     case ESP_GATTC_CONNECT_EVT: {
       if (!this->parent_->check_addr(param->connect.remote_bda))
         break;
-      ESP_LOGI(TAG, "GATT client connected");
+      ESP_LOGI(TAG, "GATT client connected - setting up CE208/CE308 security");
       this->link_encrypted_ = false;
       this->service_start_handle_ = 0;
       this->service_end_handle_ = 0;
@@ -644,28 +624,19 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->expected_response_slots_ = 0;
       this->current_response_slot_ = 0;
       std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
-      // this->set_state_(FsmState::RESOLVING);
       this->sync_address_from_parent_();
       
-      // Copy remote address safely before timeout
-      std::array<uint8_t, 6> remote_addr;
-      std::memcpy(remote_addr.data(), param->connect.remote_bda, 6);
+      // CE208/CE308 security setup - EXACT pattern from working implementation
+      ESP_LOGI(TAG, "Configuring security for Energomera CE208/CE308 with PIN %06u", this->passkey_);
+      esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
+      esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
+      esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(uint8_t));
+      esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
       
-      if (this->passkey_ != 0) {
-        ESP_LOGI(TAG, "Will initiate MITM pairing with PIN %06u", this->passkey_);
-        
-        // Remove existing bond to force fresh pairing with PIN
-        ESP_LOGI(TAG, "Removing existing bond to force fresh pairing");
-        esp_ble_remove_bond_device(const_cast<uint8_t*>(remote_addr.data()));
-        
-        this->set_timeout(100, [this, remote_addr]() {
-          ESP_LOGI(TAG, "Initiating encrypted link with MITM protection");
-          esp_err_t result = esp_ble_set_encryption(const_cast<uint8_t*>(remote_addr.data()), ESP_BLE_SEC_ENCRYPT_MITM);
-          ESP_LOGI(TAG, "esp_ble_set_encryption result: %d", result);
-        });
-      } else {
-        ESP_LOGW(TAG, "No PIN configured - pairing will rely on existing bond or fail");
-      }
+      // Immediately initiate encryption like CE208 implementation
+      ESP_LOGI(TAG, "Initiating MITM encryption immediately");
+      esp_err_t result = esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
+      ESP_LOGI(TAG, "esp_ble_set_encryption result: %d", result);
 
       break;
     }
@@ -712,7 +683,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
     case ESP_GATTC_SEARCH_CMPL_EVT: {
       if (param->search_cmpl.conn_id != this->parent_->get_conn_id())
         break;
-      ESP_LOGI(TAG, "Service discovery completed");
+      ESP_LOGI(TAG, "General service discovery completed");
       ESP_LOGI(TAG, "Connection state: connected=%s, paired=%s, encrypted=%s",
                this->parent_->connected() ? "YES" : "NO",
                this->parent_->is_paired() ? "YES" : "NO", 
@@ -721,32 +692,61 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       // Log services immediately before they might be released
       log_discovered_services_();
       
-      // Don't set node_state to ESTABLISHED yet - keep services alive
-      // this->node_state = esp32_ble_tracker::ClientState::ESTABLISHED;
-      this->services_logged_ = false;  // Reset flag to log services on next update
-      this->set_state_(FsmState::RESOLVING);
-      // if (this->service_start_handle_ == 0) {
-      //   if (!this->service_search_requested_) {
-      //     esp_bt_uuid_t svc_uuid{};
-      //     svc_uuid.len = ESP_UUID_LEN_16;
-      //     svc_uuid.uuid.uuid16 = 0x0100;
-      //     if (esp_ble_gattc_search_service(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), &svc_uuid) ==
-      //         ESP_OK) {
-      //       this->service_search_requested_ = true;
-      //       ESP_LOGW(TAG, "Energomera service not found; requesting targeted search");
-      //       break;
-      //     }
-      //   }
-      //   ESP_LOGW(TAG, "Energomera service not found during discovery");
-      //   this->set_state_(FsmState::ERROR);
-      //   break;
-      // }
-      // if (!this->resolve_characteristics_()) {
-      //   this->set_state_(FsmState::ERROR);
-      //   break;
-      // }
-      // this->set_state_(FsmState::REQUESTING_FIRMWARE);
-      // this->request_firmware_version_();
+      // Check if we found the Energomera service during general discovery
+      if (this->service_start_handle_ == 0) {
+        if (!this->service_search_requested_) {
+          ESP_LOGI(TAG, "Energomera service not found in general discovery, performing targeted search");
+          esp_bt_uuid_t target_uuid;
+          target_uuid.len = ESP_UUID_LEN_128;
+          memcpy(target_uuid.uuid.uuid128, ENERGOMERA_SERVICE_UUID_128, 16);
+          esp_err_t search_result = esp_ble_gattc_search_service(this->parent_->get_gattc_if(), 
+                                                                this->parent_->get_conn_id(), 
+                                                                &target_uuid);
+          if (search_result == ESP_OK) {
+            this->service_search_requested_ = true;
+            ESP_LOGI(TAG, "Targeted service search initiated - waiting for ESP_GATTC_DIS_SRVC_CMPL_EVT");
+            break;  // Wait for ESP_GATTC_DIS_SRVC_CMPL_EVT
+          } else {
+            ESP_LOGE(TAG, "Failed to initiate targeted service search: %d", search_result);
+            this->set_state_(FsmState::ERROR);
+            break;
+          }
+        }
+        ESP_LOGW(TAG, "Energomera service not found after both general and targeted search");
+        this->set_state_(FsmState::ERROR);
+        break;
+      }
+      
+      // Service found during general discovery, proceed with characteristic resolution
+      ESP_LOGI(TAG, "Found Energomera service in general discovery, resolving characteristics...");
+      if (!this->resolve_characteristics_()) {
+        this->set_state_(FsmState::ERROR);
+        break;
+      }
+      this->set_state_(FsmState::REQUESTING_FIRMWARE);
+      this->request_firmware_version_();
+      break;
+    }
+    case ESP_GATTC_DIS_SRVC_CMPL_EVT: {
+      if (param->dis_srvc_cmpl.conn_id != this->parent_->get_conn_id())
+        break;
+      ESP_LOGI(TAG, "Targeted service search completed (status=%d)", param->dis_srvc_cmpl.status);
+      
+      // This event is only triggered after our targeted search for Energomera service
+      if (this->service_start_handle_ == 0) {
+        ESP_LOGW(TAG, "Energomera service not found even after targeted search - CE308 may not be advertising service correctly");
+        this->set_state_(FsmState::ERROR);
+        break;
+      }
+      
+      ESP_LOGI(TAG, "Targeted search found Energomera service (0x%04X-0x%04X), resolving characteristics...", 
+               this->service_start_handle_, this->service_end_handle_);
+      if (!this->resolve_characteristics_()) {
+        this->set_state_(FsmState::ERROR);
+        break;
+      }
+      this->set_state_(FsmState::REQUESTING_FIRMWARE);
+      this->request_firmware_version_();
       break;
     }
     case ESP_GATTC_READ_CHAR_EVT: {
