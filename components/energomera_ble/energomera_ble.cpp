@@ -588,7 +588,8 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->sync_address_from_parent_();
       // this->initiate_pairing_(param->connect.remote_bda);
       ESP_LOGI(TAG, "Initiating pairing with PIN");
-      this->parent_->pair();
+      // this->parent_->pair();
+      esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
 
       break;
     }
