@@ -867,6 +867,42 @@ void EnergomeraBleComponent::log_discovered_services_() {
       ESP_LOGI(TAG, "    TX Characteristic (%s) NOT FOUND", ENERGOMERA_TX_UUID.to_string().c_str());
     }
 
+    uint16_t start_handle = energomera_service->start_handle;
+    uint16_t end_handle = 0x004e;  // energomera_service->end_handle;
+    uint16_t offset = 0;
+    esp_gattc_char_elem_t result;
+
+    while (true) {
+      uint16_t count = 1;
+      esp_gatt_status_t status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                                            start_handle, end_handle, &result, &count, offset);
+      if (status == ESP_GATT_INVALID_OFFSET || status == ESP_GATT_NOT_FOUND) {
+        break;
+      }
+      if (status != ESP_GATT_OK) {
+        ESP_LOGW(TAG, "[%s] esp_ble_gattc_get_all_char error, status=%d", 
+                 this->parent_->address_str().c_str(), status);
+        break;
+      }
+      if (count == 0) {
+        break;
+      }
+
+      esphome::esp32_ble_tracker::ESPBTUUID uuid = esphome::esp32_ble_tracker::ESPBTUUID::from_uuid(result.uuid);
+      esp_gatt_char_prop_t properties = result.properties;
+      uint16_t handle = result.char_handle;
+
+      // BLECharacteristic *characteristic = new BLECharacteristic();  // NOLINT(cppcoreguidelines-owning-memory)
+      //  characteristic->uuid = espbt::ESPBTUUID::from_uuid(result.uuid);
+      //   characteristic->properties = result.properties;
+      //   characteristic->handle = result.char_handle;
+      //   characteristic->service = this;
+      //  this->characteristics.push_back(characteristic);
+      ESP_LOGV(TAG, "[%s]  characteristic %s, handle 0x%x, properties 0x%x", 
+               this->parent_->address_str().c_str(), uuid.to_string().c_str(), handle, properties);
+      offset++;
+    }
+
   } else {
     ESP_LOGI(TAG, "  Energomera Service (%s): NOT FOUND", ENERGOMERA_SERVICE_UUID.to_string().c_str());
   }
