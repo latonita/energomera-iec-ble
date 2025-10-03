@@ -876,12 +876,13 @@ void EnergomeraBleComponent::log_discovered_services_() {
       uint16_t count = 1;
       esp_gatt_status_t status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
                                                             start_handle, end_handle, &result, &count, offset);
+
+      ESP_LOGI(TAG, "get_all_char offset=%d, status=%d, count=%d", offset, status, count);
       if (status == ESP_GATT_INVALID_OFFSET || status == ESP_GATT_NOT_FOUND) {
         break;
       }
       if (status != ESP_GATT_OK) {
-        ESP_LOGW(TAG, "[%s] esp_ble_gattc_get_all_char error, status=%d", 
-                 this->parent_->address_str().c_str(), status);
+        ESP_LOGW(TAG, "[%s] esp_ble_gattc_get_all_char error, status=%d", this->parent_->address_str().c_str(), status);
         break;
       }
       if (count == 0) {
@@ -898,8 +899,8 @@ void EnergomeraBleComponent::log_discovered_services_() {
       //   characteristic->handle = result.char_handle;
       //   characteristic->service = this;
       //  this->characteristics.push_back(characteristic);
-      ESP_LOGV(TAG, "[%s]  characteristic %s, handle 0x%x, properties 0x%x", 
-               this->parent_->address_str().c_str(), uuid.to_string().c_str(), handle, properties);
+      ESP_LOGV(TAG, "[%s]  characteristic %s, handle 0x%x, properties 0x%x", this->parent_->address_str().c_str(),
+               uuid.to_string().c_str(), handle, properties);
       offset++;
     }
 
