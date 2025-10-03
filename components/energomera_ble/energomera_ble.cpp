@@ -79,6 +79,9 @@ void EnergomeraBleComponent::setup() {
   uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
   uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
 
+  ESP_LOGI(TAG, "Setting BLE security parameters: auth_req=0x%02X, iocap=%d, passkey=%06u", 
+           auth_req, iocap, this->passkey_);
+  
   esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
   esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
   esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
@@ -637,14 +640,26 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       std::fill(this->response_char_handles_.begin(), this->response_char_handles_.end(), 0);
       // this->set_state_(FsmState::RESOLVING);
       this->sync_address_from_parent_();
-      // this->initiate_pairing_(param->connect.remote_bda);
-
-      //esp_ble_remove_bond_device(param->connect.remote_bda);
-      this->set_timeout(200, [this, param]() {
-        ESP_LOGI(TAG, "Initiating pairing with PIN");
-        esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
-      });
-      // this->parent_->pair();
+      
+      // Copy remote address safely before timeout
+      std::array<uint8_t, 6> remote_addr;
+      std::memcpy(remote_addr.data(), param->connect.remote_bda, 6);
+      
+      if (this->passkey_ != 0) {
+        ESP_LOGI(TAG, "Will initiate MITM pairing with PIN %06u", this->passkey_);
+        
+        // Optional: Remove existing bond to force fresh pairing (uncomment for testing)
+        // ESP_LOGI(TAG, "Removing existing bond to force fresh pairing");
+        // esp_ble_remove_bond_device(remote_addr.data());
+        
+        this->set_timeout(500, [this, remote_addr]() {
+          ESP_LOGI(TAG, "Initiating encrypted link with MITM protection");
+          esp_err_t result = esp_ble_set_encryption(const_cast<uint8_t*>(remote_addr.data()), ESP_BLE_SEC_ENCRYPT_MITM);
+          ESP_LOGI(TAG, "esp_ble_set_encryption result: %d", result);
+        });
+      } else {
+        ESP_LOGW(TAG, "No PIN configured - pairing will rely on existing bond or fail");
+      }
 
       break;
     }
@@ -822,43 +837,54 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 }
 
 void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  ESP_LOGI(TAG, "GAP Event: %d", event);
+  
   switch (event) {
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
-      if (!this->parent_->check_addr(param->ble_security.key_notif.bd_addr))
+      if (!this->parent_->check_addr(param->ble_security.key_notif.bd_addr)) {
+        ESP_LOGW(TAG, "Passkey notification for wrong device - ignoring");
         break;
-      ESP_LOGE(TAG, "Passkey notification: %06u", param->ble_security.key_notif.passkey);
+      }
+      ESP_LOGE(TAG, "*** Passkey notification: %06u ***", param->ble_security.key_notif.passkey);
       break;
 
     case ESP_GAP_BLE_PASSKEY_REQ_EVT:
-      if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr))
+      if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr)) {
+        ESP_LOGW(TAG, "Passkey request for wrong device - ignoring");
         break;
-      ESP_LOGE(TAG, "Supplying PIN %06u", this->passkey_);
+      }
+      ESP_LOGE(TAG, "*** Passkey request - supplying PIN %06u ***", this->passkey_);
       esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, this->passkey_);
       break;
 
     case ESP_GAP_BLE_SEC_REQ_EVT:
-      if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr))
+      if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr)) {
+        ESP_LOGW(TAG, "Security request for wrong device - ignoring");
         break;
-      ESP_LOGE(TAG, "Security request received, confirming");
+      }
+      ESP_LOGE(TAG, "*** Security request received, confirming ***");
       esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
       break;
 
     case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
-      if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr))
-        break;
-      ESP_LOGE(TAG, "ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT done");
+      // Note: This event might not have bd_addr in param structure
+      ESP_LOGE(TAG, "*** Bond removal completed ***");
       break;
 
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
-      if (!this->parent_->check_addr(param->ble_security.auth_cmpl.bd_addr))
+      if (!this->parent_->check_addr(param->ble_security.auth_cmpl.bd_addr)) {
+        ESP_LOGW(TAG, "Auth completion for wrong device - ignoring");
         break;
+      }
 
       if (param->ble_security.auth_cmpl.success) {
-        ESP_LOGI(TAG, "Pairing completed successfully");
-        ESP_LOGI(TAG, "Auth mode: 0x%02X, Key present: 0x%02X, Auth mode: %d", param->ble_security.auth_cmpl.auth_mode,
-                 param->ble_security.auth_cmpl.key_present, param->ble_security.auth_cmpl.auth_mode);
+        ESP_LOGE(TAG, "*** Pairing completed successfully ***");
+        ESP_LOGI(TAG, "Auth mode: 0x%02X, Key present: 0x%02X", 
+                 param->ble_security.auth_cmpl.auth_mode,
+                 param->ble_security.auth_cmpl.key_present);
         this->set_timeout(500, [this]() {
           this->link_encrypted_ = true;
+          ESP_LOGI(TAG, "Link encryption status updated");
           // this->set_state_(FsmState::RESOLVING);
         });
 
@@ -868,7 +894,7 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
         // else if (this->state_ == FsmState::WAITING_NOTIFICATION_ENABLE)
         //   this->set_timeout("enable_notify", 100, [this]() { this->enable_notifications_(); });
       } else {
-        ESP_LOGE(TAG, "Pairing failed, fail reason=%d", param->ble_security.auth_cmpl.fail_reason);
+        ESP_LOGE(TAG, "*** Pairing FAILED, reason=%d ***", param->ble_security.auth_cmpl.fail_reason);
         this->link_encrypted_ = false;
       }
       break;
@@ -922,121 +948,94 @@ void EnergomeraBleComponent::log_discovered_services_() {
   if (energomera_service != nullptr) {
     ESP_LOGI(TAG, "  Energomera Service (%s): handles 0x%04X-0x%04X", ENERGOMERA_SERVICE_UUID.to_string().c_str(),
              energomera_service->start_handle, energomera_service->end_handle);
-    if (!energomera_service->parsed) {
-      energomera_service->parse_characteristics();
-    }
 
     uint16_t start_handle = energomera_service->start_handle;
     uint16_t end_handle = energomera_service->end_handle;
     
-    // If end_handle is 0xFFFF, try to find the actual end by looking at next service
+    // If end_handle is 0xFFFF, use a reasonable range
     if (end_handle == 0xFFFF) {
-      ESP_LOGW(TAG, "Service end_handle is 0xFFFF - trying to find actual end");
-      
-      // Method 1: Use your known working range
-      end_handle = start_handle + 0x30;  // Adjust based on your device
+      ESP_LOGW(TAG, "Service end_handle is 0xFFFF - using reasonable range");
+      end_handle = start_handle + 0x30;  // Conservative range
       ESP_LOGI(TAG, "Using calculated end_handle: 0x%04X", end_handle);
-      
-      // Method 2: Try to find next service (commented out for now)
-      /*
-      uint16_t next_service_start = 0xFFFF;
-      // Check common services after Energomera
-      uint16_t test_services[] = {0x1800, 0x1801, 0x180A, 0x180F};
-      for (uint16_t test_uuid : test_services) {
-        auto *test_svc = this->parent_->get_service(test_uuid);
-        if (test_svc != nullptr && test_svc->start_handle > start_handle) {
-          if (test_svc->start_handle < next_service_start) {
-            next_service_start = test_svc->start_handle;
+    }
+    
+    // FORCE characteristic discovery using ESP-IDF directly
+    ESP_LOGI(TAG, "Manual characteristic discovery in range 0x%04X-0x%04X", start_handle, end_handle);
+    
+    // Get characteristic count first
+    uint16_t char_count = 0;
+    esp_gatt_status_t status = esp_ble_gattc_get_attr_count(
+        this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+        ESP_GATT_DB_CHARACTERISTIC, start_handle, end_handle, 
+        ESP_GATT_INVALID_HANDLE, &char_count);
+    
+    ESP_LOGI(TAG, "Characteristic count query: status=%d, count=%d", status, char_count);
+    
+    if (status == ESP_GATT_OK && char_count > 0) {
+      // Allocate buffer for all characteristics
+      esp_gattc_char_elem_t *char_elems = (esp_gattc_char_elem_t*)malloc(sizeof(esp_gattc_char_elem_t) * char_count);
+      if (char_elems != nullptr) {
+        status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                            start_handle, end_handle, char_elems, &char_count, 0);
+        
+        ESP_LOGI(TAG, "get_all_char: status=%d, returned_count=%d", status, char_count);
+        
+        if (status == ESP_GATT_OK) {
+          for (uint16_t i = 0; i < char_count; i++) {
+            esp_gattc_char_elem_t *elem = &char_elems[i];
+            
+            if (elem->uuid.len == ESP_UUID_LEN_16) {
+              ESP_LOGI(TAG, "  Char[%d]: UUID16=0x%04X, handle=0x%04X, props=0x%02X",
+                      i, elem->uuid.uuid.uuid16, elem->char_handle, elem->properties);
+            } else if (elem->uuid.len == ESP_UUID_LEN_128) {
+              ESP_LOGI(TAG, "  Char[%d]: UUID128=%02X%02X%02X%02X-..., handle=0x%04X, props=0x%02X",
+                      i, elem->uuid.uuid.uuid128[15], elem->uuid.uuid.uuid128[14], 
+                      elem->uuid.uuid.uuid128[13], elem->uuid.uuid.uuid128[12],
+                      elem->char_handle, elem->properties);
+              
+              // Check for your specific characteristics
+              if (memcmp(elem->uuid.uuid.uuid128, ENERGOMERA_VERSION_UUID_128, 16) == 0) {
+                ESP_LOGI(TAG, "    ✓ FOUND VERSION CHARACTERISTIC at handle 0x%04X", elem->char_handle);
+              } else if (memcmp(elem->uuid.uuid.uuid128, ENERGOMERA_TX_UUID_128, 16) == 0) {
+                ESP_LOGI(TAG, "    ✓ FOUND TX CHARACTERISTIC at handle 0x%04X", elem->char_handle);
+              }
+            }
           }
         }
+        free(char_elems);
       }
-      if (next_service_start != 0xFFFF) {
-        end_handle = next_service_start - 1;
-        ESP_LOGI(TAG, "Found next service at 0x%04X, using end_handle: 0x%04X", 
-                 next_service_start, end_handle);
-      }
-      */
+    } else {
+      ESP_LOGW(TAG, "No characteristics found using direct ESP-IDF calls");
     }
-    uint16_t offset = 0;
-    uint16_t count = 0;
-
-    esp_gatt_status_t status = esp_ble_gattc_get_attr_count(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                                            ESP_GATT_DB_CHARACTERISTIC, start_handle,
-                                                            energomera_service->end_handle, ESP_GATT_INVALID_HANDLE, &count);
-    ESP_LOGI(TAG, "get_all_char_count offset=%d, status=%d, count=%d", offset, status, count);
-
+    
+    // Also try calling the base class parse_characteristics()
+    if (!energomera_service->parsed) {
+      ESP_LOGI(TAG, "Trying base class parse_characteristics()");
+      energomera_service->parse_characteristics();
+    }
+    
+    ESP_LOGI(TAG, "Service now has %d characteristics", energomera_service->characteristics.size());
     for (auto *chr : energomera_service->characteristics) {
-      ESP_LOGI(TAG, "    Characteristic: %s (handle: 0x%04X, props: 0x%02X)", chr->uuid.to_string().c_str(),
-               chr->handle, chr->properties);
+      ESP_LOGI(TAG, "  Characteristic: %s (handle: 0x%04X, props: 0x%02X)", 
+               chr->uuid.to_string().c_str(), chr->handle, chr->properties);
     }
 
+    // Check for specific characteristics
     auto *version_char = energomera_service->get_characteristic(ENERGOMERA_VERSION_UUID);
     if (version_char != nullptr) {
-      ESP_LOGI(TAG, "    Version Characteristic found at handle 0x%04X", version_char->handle);
+      ESP_LOGI(TAG, "✓ Version Characteristic found at handle 0x%04X", version_char->handle);
     } else {
-      ESP_LOGI(TAG, "    Version Characteristic (%s) NOT FOUND", ENERGOMERA_VERSION_UUID.to_string().c_str());
+      ESP_LOGI(TAG, "✗ Version Characteristic NOT FOUND");
     }
+    
     auto *tx_char = energomera_service->get_characteristic(ENERGOMERA_TX_UUID);
     if (tx_char != nullptr) {
-      ESP_LOGI(TAG, "    TX Characteristic found at handle 0x%04X", tx_char->handle);
+      ESP_LOGI(TAG, "✓ TX Characteristic found at handle 0x%04X", tx_char->handle);
     } else {
-      ESP_LOGI(TAG, "    TX Characteristic (%s) NOT FOUND", ENERGOMERA_TX_UUID.to_string().c_str());
+      ESP_LOGI(TAG, "✗ TX Characteristic NOT FOUND");
     }
 
-    // Method A: Try direct characteristic enumeration
-    ESP_LOGI(TAG, "Method A: Direct characteristic enumeration in range 0x%04X-0x%04X", start_handle, end_handle);
-    esp_gattc_char_elem_t result;
-    
-    while (offset < 50) {  // Safety limit to prevent infinite loop
-      count = 1;
-      status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), start_handle,
-                                          end_handle, &result, &count, offset);
 
-      ESP_LOGI(TAG, "get_all_char offset=%d, status=%d, count=%d", offset, status, count);
-      if (status == ESP_GATT_INVALID_OFFSET || status == ESP_GATT_NOT_FOUND) {
-        break;
-      }
-      if (status != ESP_GATT_OK) {
-        ESP_LOGW(TAG, "esp_ble_gattc_get_all_char error, status=%d", status);
-        break;
-      }
-      if (count == 0) {
-        break;
-      }
-
-      esphome::esp32_ble_tracker::ESPBTUUID uuid = esphome::esp32_ble_tracker::ESPBTUUID::from_uuid(result.uuid);
-      esp_gatt_char_prop_t properties = result.properties;
-      uint16_t handle = result.char_handle;
-
-      ESP_LOGI(TAG, "Found characteristic %s, handle 0x%04X, properties 0x%02X", 
-               uuid.to_string().c_str(), handle, properties);
-      offset++;
-    }
-    
-    // Method B: Try handle-by-handle scanning if Method A failed
-    if (offset == 0) {
-      ESP_LOGI(TAG, "Method B: Handle-by-handle scanning");
-      for (uint16_t h = start_handle + 1; h < start_handle + 0x20 && h < end_handle; h++) {
-        esp_gattc_char_elem_t scan_result;
-        uint16_t scan_count = 1;
-        esp_gatt_status_t scan_status = esp_ble_gattc_get_char_by_uuid(
-            this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-            h, h, ENERGOMERA_VERSION_UUID.get_uuid(), &scan_result, &scan_count);
-            
-        if (scan_status == ESP_GATT_OK && scan_count > 0) {
-          ESP_LOGI(TAG, "Found version char by handle scan at 0x%04X", scan_result.char_handle);
-        }
-      }
-    }
-
-    // try another way
-    count = 1;
-    status = esp_ble_gattc_get_char_by_uuid(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), start_handle,
-                                            end_handle, ENERGOMERA_VERSION_UUID.get_uuid(), &result, &count);
-    ESP_LOGI(TAG, "get_char_by_uuid status=%d, count=%d", status, count);
-    status = esp_ble_gattc_get_char_by_uuid(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), start_handle,
-                                            end_handle, ENERGOMERA_VERSION_UUID.get_uuid(), &result, &count);
-    ESP_LOGI(TAG, "get_char_by_uuid status=%d, count=%d", status, count);
 
   } else {
     ESP_LOGI(TAG, "  Energomera Service (%s): NOT FOUND", ENERGOMERA_SERVICE_UUID.to_string().c_str());
