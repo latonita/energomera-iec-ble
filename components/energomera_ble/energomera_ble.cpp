@@ -73,8 +73,8 @@ void EnergomeraBleComponent::setup() {
   this->sync_address_from_parent_();
 
   // Configure default security parameters to allow MITM bonding with PIN
-  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
-  esp_ble_io_cap_t iocap = ESP_IO_CAP_IO;
+  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND;  // ESP_LE_AUTH_REQ_SC_MITM_BOND;
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;        // ESP_IO_CAP_IO;
   uint8_t key_size = 16;
   uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
   uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
@@ -89,6 +89,56 @@ void EnergomeraBleComponent::setup() {
 void EnergomeraBleComponent::loop() {
   if (!this->address_set_)
     this->sync_address_from_parent_();
+  //     IDLE,
+  // RESOLVING,
+  // REQUESTING_FIRMWARE,
+  // WAITING_FIRMWARE,
+  // ENABLING_NOTIFICATION,
+  // WAITING_NOTIFICATION_ENABLE,
+  // SENDING_COMMAND,
+  // WAITING_NOTIFICATION,
+  // READING_RESPONSE,
+  // COMPLETE,
+  // ERROR,
+  // DISCONNECTED
+  switch (this->state_) {
+    case FsmState::IDLE: {
+    } break;
+
+    case FsmState::RESOLVING: {
+      this->log_discovered_services_();
+      this->set_state_(FsmState::REQUESTING_FIRMWARE);
+    } break;
+
+    case FsmState::REQUESTING_FIRMWARE: {
+    } break;
+
+    case FsmState::WAITING_FIRMWARE: {
+    } break;
+
+    case FsmState::ENABLING_NOTIFICATION: {
+    } break;
+
+    case FsmState::WAITING_NOTIFICATION_ENABLE: {
+    } break;
+
+    case FsmState::SENDING_COMMAND: {
+    } break;
+
+    case FsmState::WAITING_NOTIFICATION: {
+    } break;
+
+    case FsmState::READING_RESPONSE: {
+    } break;
+
+    case FsmState::COMPLETE:
+      // do nothing
+      break;
+
+    case FsmState::ERROR:
+      // do nothing
+      break;
+  }
 }
 
 void EnergomeraBleComponent::update() {
@@ -587,9 +637,12 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       this->set_state_(FsmState::RESOLVING);
       this->sync_address_from_parent_();
       // this->initiate_pairing_(param->connect.remote_bda);
-      ESP_LOGI(TAG, "Initiating pairing with PIN");
+
+      this->set_timeout(500, [this, param]() {
+        ESP_LOGI(TAG, "Initiating pairing with PIN");
+        esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
+      });
       // this->parent_->pair();
-      esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
 
       break;
     }
@@ -637,7 +690,7 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       if (param->search_cmpl.conn_id != this->parent_->get_conn_id())
         break;
       ESP_LOGI(TAG, "Service discovery completed");
-      this->node_state = esp32_ble_tracker::ClientState::ESTABLISHED;
+      // this->node_state = esp32_ble_tracker::ClientState::ESTABLISHED;
       this->services_logged_ = false;  // Reset flag to log services on next update
       log_discovered_services_();
       // if (this->service_start_handle_ == 0) {
@@ -785,8 +838,11 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
 
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGI(TAG, "Pairing completed successfully");
+        this->set_timeout(500, [this]() {
+          this->link_encrypted_ = true;
+          this->set_state_(FsmState::RESOLVING);
+        });
 
-        this->link_encrypted_ = true;
         // if (!this->version_reported_)
         //   this->request_firmware_version_();
 
