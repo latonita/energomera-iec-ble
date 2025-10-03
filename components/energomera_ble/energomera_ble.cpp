@@ -868,14 +868,15 @@ void EnergomeraBleComponent::log_discovered_services_() {
     }
 
     uint16_t start_handle = energomera_service->start_handle;
-    uint16_t end_handle = 0x004e;  // energomera_service->end_handle;
+    uint16_t end_handle = 0x004f;  // energomera_service->end_handle;
     uint16_t offset = 0;
     esp_gattc_char_elem_t result;
+    esp_gatt_status_t status;
 
     while (true) {
       uint16_t count = 1;
-      esp_gatt_status_t status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                                            start_handle, end_handle, &result, &count, offset);
+      status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), start_handle,
+                                          end_handle, &result, &count, offset);
 
       ESP_LOGI(TAG, "get_all_char offset=%d, status=%d, count=%d", offset, status, count);
       if (status == ESP_GATT_INVALID_OFFSET || status == ESP_GATT_NOT_FOUND) {
@@ -903,6 +904,15 @@ void EnergomeraBleComponent::log_discovered_services_() {
                uuid.to_string().c_str(), handle, properties);
       offset++;
     }
+
+    // try another way
+    uint16_t count = 1;
+    status = esp_ble_gattc_get_char_by_uuid(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), start_handle,
+                                            end_handle, ENERGOMERA_VERSION_UUID.get_uuid(), &result, &count);
+    ESP_LOGI(TAG, "get_char_by_uuid status=%d, count=%d", status, count);
+    status = esp_ble_gattc_get_char_by_uuid(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), start_handle,
+                                            end_handle, ENERGOMERA_VERSION_UUID.get_uuid(), &result, &count);
+    ESP_LOGI(TAG, "get_char_by_uuid status=%d, count=%d", status, count);
 
   } else {
     ESP_LOGI(TAG, "  Energomera Service (%s): NOT FOUND", ENERGOMERA_SERVICE_UUID.to_string().c_str());
