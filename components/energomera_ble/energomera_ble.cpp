@@ -40,6 +40,15 @@ static const uint8_t ENERGOMERA_RESPONSE_UUIDS_128[16][16] = {
     {0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97, 0xe2, 0x45, 0xef, 0x8b, 0x13, 0x01, 0x1b, 0xb9},
     {0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97, 0xe2, 0x45, 0xef, 0x8b, 0x14, 0x01, 0x1b, 0xb9},
 };
+// CEREMOTE_SERVICE_UUID  "b91b0100-8bef-45e2-97c3-1cd862d914df"
+#define CEREMOTE_SERVICE_UUID \
+  { 0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97, 0xe2, 0x45, 0xef, 0x8b, 0x00, 0x01, 0x1b, 0xb9 }
+// CEREMOTE_TX_UUID  "b91b0105-8bef-45e2-97c3-1cd862d914df"  0x21
+#define CEREMOTE_TX_UUID \
+  { 0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97, 0xe2, 0x45, 0xef, 0x8b, 0x05, 0x01, 0x1b, 0xb9 }
+// CEREMOTE_RX0_UUID  "b91b0101-8bef-45e2-97c3-1cd862d914df"  0x1e
+#define CEREMOTE_RX0_UUID \
+  { 0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97, 0xe2, 0x45, 0xef, 0x8b, 0x01, 0x01, 0x1b, 0xb9 }
 
 static const uint16_t FALLBACK_VERSION_OFFSET = 0x0002;
 static const uint16_t FALLBACK_TX_OFFSET = 0x0005;
@@ -688,17 +697,14 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
                this->parent_->connected() ? "YES" : "NO", this->parent_->is_paired() ? "YES" : "NO",
                this->link_encrypted_ ? "YES" : "NO");
 
-      // Don't log services yet - wait for authentication
-      ESP_LOGI(TAG, "Service discovery completed, but waiting for authentication before accessing characteristics");
-
       // Wait for authentication before proceeding with service access
       if (!this->link_encrypted_) {
         ESP_LOGI(TAG, "Service discovery complete, but waiting for authentication before accessing services");
         break;
       }
-      
+
       ESP_LOGI(TAG, "Service discovery complete and link is encrypted - safe to proceed");
-      
+
       // Check if we found the Energomera service during general discovery
       if (this->service_start_handle_ == 0) {
         if (!this->service_search_requested_) {
@@ -725,12 +731,41 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 
       // Service found during general discovery, proceed with characteristic resolution
       ESP_LOGI(TAG, "Found Energomera service in general discovery, resolving characteristics...");
-      if (!this->resolve_characteristics_()) {
+
+      uint16_t count = 0;
+      auto status = esp_ble_gattc_get_attr_count(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+                                                 ESP_GATT_DB_CHARACTERISTIC, this->service_start_handle_,
+                                                 this->service_end_handle_, ESP_GATT_INVALID_HANDLE, &count);
+
+      if (count == 0) {
+        ESP_LOGW(TAG, "No characteristics found for Energomera service, status = %d", status);
         this->set_state_(FsmState::ERROR);
         break;
       }
-      this->set_state_(FsmState::REQUESTING_FIRMWARE);
-      this->request_firmware_version_();
+
+      ESP_LOGI(TAG, "Found %d characteristics for Energomera service, status = %d", count, status);
+
+      esp_bt_uuid_t ceremote_filter_char_uuid = {
+          .len = ESP_UUID_LEN_128,
+          .uuid =
+              {
+                  .uuid128 = CEREMOTE_TX_UUID,
+              },
+      };
+      esp_gattc_char_elem_t tx_char{};
+      uint16_t char_count{0};
+
+      status =
+          esp_ble_gattc_get_char_by_uuid(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), 0x001C, 0x004E,
+                                         ceremote_filter_char_uuid, &tx_char, &char_count);
+      ESP_LOGE(TAG, "get_char_by_uuid status=%d, count=%d, handle=%d", status, char_count, tx_char.char_handle);
+
+      // if (!this->resolve_characteristics_()) {
+      //   this->set_state_(FsmState::ERROR);
+      //   break;
+      // }
+      // this->set_state_(FsmState::REQUESTING_FIRMWARE);
+      // this->request_firmware_version_();
       break;
     }
     case ESP_GATTC_DIS_SRVC_CMPL_EVT: {
@@ -755,12 +790,12 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 
       ESP_LOGI(TAG, "Targeted search found Energomera service (0x%04X-0x%04X), resolving characteristics...",
                this->service_start_handle_, this->service_end_handle_);
-      if (!this->resolve_characteristics_()) {
-        this->set_state_(FsmState::ERROR);
-        break;
-      }
-      this->set_state_(FsmState::REQUESTING_FIRMWARE);
-      this->request_firmware_version_();
+      // if (!this->resolve_characteristics_()) {
+      //   this->set_state_(FsmState::ERROR);
+      //   break;
+      // }
+      // this->set_state_(FsmState::REQUESTING_FIRMWARE);
+      // this->request_firmware_version_();
       break;
     }
     case ESP_GATTC_READ_CHAR_EVT: {
@@ -952,26 +987,25 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
         ESP_LOGE(TAG, "*** Pairing completed successfully ***");
         ESP_LOGI(TAG, "Auth mode: 0x%02X, Key present: 0x%02X", param->ble_security.auth_cmpl.auth_mode,
                  param->ble_security.auth_cmpl.key_present);
-        
+
         // Set encryption status immediately - no delay needed
         this->link_encrypted_ = true;
         ESP_LOGI(TAG, "Link encryption status updated - now safe for GATT operations");
-        
+
         // Now that we're authenticated and encrypted, we can safely access characteristics
         ESP_LOGI(TAG, "Authentication complete - now safe to access services and characteristics");
-        
+
         // Log discovered services now that we have encrypted link
         log_discovered_services_();
-        
+
         // Check if Energomera service was found during initial discovery
         if (this->service_start_handle_ == 0) {
           ESP_LOGI(TAG, "Energomera service not found in initial discovery, performing targeted search");
           esp_bt_uuid_t target_uuid;
           target_uuid.len = ESP_UUID_LEN_128;
           memcpy(target_uuid.uuid.uuid128, ENERGOMERA_SERVICE_UUID_128, 16);
-          esp_err_t search_result = esp_ble_gattc_search_service(this->parent_->get_gattc_if(), 
-                                                                this->parent_->get_conn_id(), 
-                                                                &target_uuid);
+          esp_err_t search_result =
+              esp_ble_gattc_search_service(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), &target_uuid);
           if (search_result != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start targeted service search: %d", search_result);
             this->set_state_(FsmState::ERROR);
@@ -1041,16 +1075,6 @@ void EnergomeraBleComponent::log_discovered_services_() {
 
   // Only try get_char_by_uuid if link is encrypted to avoid ESP_GATT_INVALID_PDU
   if (this->link_encrypted_) {
-// CEREMOTE_SERVICE_UUID  "b91b0100-8bef-45e2-97c3-1cd862d914df"
-#define CEREMOTE_SERVICE_UUID \
-  { 0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97, 0xe2, 0x45, 0xef, 0x8b, 0x00, 0x01, 0x1b, 0xb9 }
-// CEREMOTE_TX_UUID  "b91b0105-8bef-45e2-97c3-1cd862d914df"  0x21
-#define CEREMOTE_TX_UUID \
-  { 0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97, 0xe2, 0x45, 0xef, 0x8b, 0x05, 0x01, 0x1b, 0xb9 }
-// CEREMOTE_RX0_UUID  "b91b0101-8bef-45e2-97c3-1cd862d914df"  0x1e
-#define CEREMOTE_RX0_UUID \
-  {0xdf, 0x14, 0xd9, 0x62, 0xd8, 0x1c, 0xc3, 0x97, 0xe2, 0x45, 0xef, 0x8b, 0x01, 0x01, 0x1b, 0xb9}
-
     esp_bt_uuid_t ceremote_filter_char_uuid = {
         .len = ESP_UUID_LEN_128,
         .uuid =
