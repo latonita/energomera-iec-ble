@@ -72,12 +72,14 @@ void EnergomeraBleComponent::setup() {
 
   this->sync_address_from_parent_();
 
-  // Configure default security parameters to allow MITM bonding with PIN
-  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_BOND_MITM;  // Require MITM protection
-  esp_ble_io_cap_t iocap = ESP_IO_CAP_IN;                   // We can INPUT (receive PIN)
+  // Configure security parameters for PIN-based pairing
+  // Try different combinations to see what the device supports
+  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;  // Secure Connections with MITM and bonding
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_KBDISP;                  // Keyboard + Display (can input AND display PIN)
   uint8_t key_size = 16;
   uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
   uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+  uint8_t oob_support = ESP_BLE_OOB_DISABLE;
 
   ESP_LOGI(TAG, "Setting BLE security parameters: auth_req=0x%02X, iocap=%d, passkey=%06u", 
            auth_req, iocap, this->passkey_);
@@ -85,8 +87,12 @@ void EnergomeraBleComponent::setup() {
   esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth_req, sizeof(auth_req));
   esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
   esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &key_size, sizeof(key_size));
+  esp_ble_gap_set_security_param(ESP_BLE_SM_OOB_SUPPORT, &oob_support, sizeof(oob_support));
   esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(init_key));
   esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &resp_key, sizeof(resp_key));
+  
+  // Also set a static passkey for consistent pairing
+  esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &this->passkey_, sizeof(this->passkey_));
 }
 
 void EnergomeraBleComponent::loop() {
@@ -837,7 +843,17 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 }
 
 void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-  ESP_LOGI(TAG, "GAP Event: %d", event);
+  const char* event_names[] = {
+    "ADV_DATA_SET_COMPLETE", "SCAN_RSP_DATA_SET_COMPLETE", "SCAN_PARAM_SET_COMPLETE", "SCAN_RESULT", 
+    "ADV_DATA_RAW_SET_COMPLETE", "SCAN_RSP_DATA_RAW_SET_COMPLETE", "ADV_START_COMPLETE", "SCAN_START_COMPLETE",
+    "AUTH_CMPL", "KEY", "SEC_REQ", "PASSKEY_NOTIF", "PASSKEY_REQ", "OOB_REQ", "LOCAL_IR", "LOCAL_ER", 
+    "NC_REQ", "ADV_STOP_COMPLETE", "SCAN_STOP_COMPLETE", "SET_STATIC_RAND_ADDR", "UPDATE_CONN_PARAMS",
+    "SET_PKT_LENGTH_COMPLETE", "SET_LOCAL_PRIVACY_COMPLETE", "REMOVE_BOND_DEV_COMPLETE", "CLEAR_BOND_DEV_COMPLETE",
+    "GET_BOND_DEV_COMPLETE", "READ_RSSI_COMPLETE", "UPDATE_WHITELIST_COMPLETE"
+  };
+  
+  const char* event_name = (event < sizeof(event_names)/sizeof(event_names[0])) ? event_names[event] : "UNKNOWN";
+  ESP_LOGI(TAG, "GAP Event %d (%s)", event, event_name);
   
   switch (event) {
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
@@ -857,14 +873,35 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
       esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, this->passkey_);
       break;
 
-    case ESP_GAP_BLE_SEC_REQ_EVT:
+    case ESP_GAP_BLE_SEC_REQ_EVT: {
       if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr)) {
         ESP_LOGW(TAG, "Security request for wrong device - ignoring");
         break;
       }
-      ESP_LOGE(TAG, "*** Security request received, confirming ***");
-      esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+      ESP_LOGE(TAG, "*** Security request received, accepting with MITM requirements ***");
+      esp_err_t sec_rsp = esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+      ESP_LOGI(TAG, "Security response result: %d", sec_rsp);
       break;
+    }
+
+    case ESP_GAP_BLE_NC_REQ_EVT:
+      if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr)) {
+        ESP_LOGW(TAG, "Numeric comparison for wrong device - ignoring");
+        break;
+      }
+      ESP_LOGE(TAG, "*** Numeric comparison request: %06u ***", param->ble_security.key_notif.passkey);
+      esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
+      break;
+
+    case ESP_GAP_BLE_OOB_REQ_EVT: {
+      if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr)) {
+        ESP_LOGW(TAG, "OOB request for wrong device - ignoring");
+        break;
+      }
+      ESP_LOGE(TAG, "*** OOB data request - rejecting ***");
+      esp_ble_oob_req_reply(param->ble_security.ble_req.bd_addr, nullptr, 16);
+      break;
+    }
 
     case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
       // Note: This event might not have bd_addr in param structure
