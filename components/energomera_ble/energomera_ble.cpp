@@ -692,9 +692,17 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       if (param->search_cmpl.conn_id != this->parent_->get_conn_id())
         break;
       ESP_LOGI(TAG, "Service discovery completed");
+      ESP_LOGI(TAG, "Connection state: connected=%s, paired=%s, encrypted=%s",
+               this->parent_->connected() ? "YES" : "NO",
+               this->parent_->is_paired() ? "YES" : "NO", 
+               this->link_encrypted_ ? "YES" : "NO");
+      
+      // Log services immediately before they might be released
+      log_discovered_services_();
+      
+      // Don't set node_state to ESTABLISHED yet - keep services alive
       // this->node_state = esp32_ble_tracker::ClientState::ESTABLISHED;
       this->services_logged_ = false;  // Reset flag to log services on next update
-      log_discovered_services_();
       this->set_state_(FsmState::RESOLVING);
       // if (this->service_start_handle_ == 0) {
       //   if (!this->service_search_requested_) {
@@ -919,13 +927,42 @@ void EnergomeraBleComponent::log_discovered_services_() {
     }
 
     uint16_t start_handle = energomera_service->start_handle;
-    uint16_t end_handle = 0x004f;  // energomera_service->end_handle;
+    uint16_t end_handle = energomera_service->end_handle;
+    
+    // If end_handle is 0xFFFF, try to find the actual end by looking at next service
+    if (end_handle == 0xFFFF) {
+      ESP_LOGW(TAG, "Service end_handle is 0xFFFF - trying to find actual end");
+      
+      // Method 1: Use your known working range
+      end_handle = start_handle + 0x30;  // Adjust based on your device
+      ESP_LOGI(TAG, "Using calculated end_handle: 0x%04X", end_handle);
+      
+      // Method 2: Try to find next service (commented out for now)
+      /*
+      uint16_t next_service_start = 0xFFFF;
+      // Check common services after Energomera
+      uint16_t test_services[] = {0x1800, 0x1801, 0x180A, 0x180F};
+      for (uint16_t test_uuid : test_services) {
+        auto *test_svc = this->parent_->get_service(test_uuid);
+        if (test_svc != nullptr && test_svc->start_handle > start_handle) {
+          if (test_svc->start_handle < next_service_start) {
+            next_service_start = test_svc->start_handle;
+          }
+        }
+      }
+      if (next_service_start != 0xFFFF) {
+        end_handle = next_service_start - 1;
+        ESP_LOGI(TAG, "Found next service at 0x%04X, using end_handle: 0x%04X", 
+                 next_service_start, end_handle);
+      }
+      */
+    }
     uint16_t offset = 0;
     uint16_t count = 0;
 
     esp_gatt_status_t status = esp_ble_gattc_get_attr_count(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                                            ESP_GATT_DB_CHARACTERISTIC, this->service_start_handle_,
-                                                            this->service_end_handle_, ESP_GATT_INVALID_HANDLE, &count);
+                                                            ESP_GATT_DB_CHARACTERISTIC, start_handle,
+                                                            energomera_service->end_handle, ESP_GATT_INVALID_HANDLE, &count);
     ESP_LOGI(TAG, "get_all_char_count offset=%d, status=%d, count=%d", offset, status, count);
 
     for (auto *chr : energomera_service->characteristics) {
@@ -946,10 +983,11 @@ void EnergomeraBleComponent::log_discovered_services_() {
       ESP_LOGI(TAG, "    TX Characteristic (%s) NOT FOUND", ENERGOMERA_TX_UUID.to_string().c_str());
     }
 
+    // Method A: Try direct characteristic enumeration
+    ESP_LOGI(TAG, "Method A: Direct characteristic enumeration in range 0x%04X-0x%04X", start_handle, end_handle);
     esp_gattc_char_elem_t result;
-    // esp_gatt_status_t status;
-
-    while (true) {
+    
+    while (offset < 50) {  // Safety limit to prevent infinite loop
       count = 1;
       status = esp_ble_gattc_get_all_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), start_handle,
                                           end_handle, &result, &count, offset);
@@ -959,7 +997,7 @@ void EnergomeraBleComponent::log_discovered_services_() {
         break;
       }
       if (status != ESP_GATT_OK) {
-        ESP_LOGW(TAG, "[%s] esp_ble_gattc_get_all_char error, status=%d", this->parent_->address_str().c_str(), status);
+        ESP_LOGW(TAG, "esp_ble_gattc_get_all_char error, status=%d", status);
         break;
       }
       if (count == 0) {
@@ -970,15 +1008,25 @@ void EnergomeraBleComponent::log_discovered_services_() {
       esp_gatt_char_prop_t properties = result.properties;
       uint16_t handle = result.char_handle;
 
-      // BLECharacteristic *characteristic = new BLECharacteristic();  // NOLINT(cppcoreguidelines-owning-memory)
-      //  characteristic->uuid = espbt::ESPBTUUID::from_uuid(result.uuid);
-      //   characteristic->properties = result.properties;
-      //   characteristic->handle = result.char_handle;
-      //   characteristic->service = this;
-      //  this->characteristics.push_back(characteristic);
-      ESP_LOGV(TAG, "[%s]  characteristic %s, handle 0x%x, properties 0x%x", this->parent_->address_str().c_str(),
+      ESP_LOGI(TAG, "Found characteristic %s, handle 0x%04X, properties 0x%02X", 
                uuid.to_string().c_str(), handle, properties);
       offset++;
+    }
+    
+    // Method B: Try handle-by-handle scanning if Method A failed
+    if (offset == 0) {
+      ESP_LOGI(TAG, "Method B: Handle-by-handle scanning");
+      for (uint16_t h = start_handle + 1; h < start_handle + 0x20 && h < end_handle; h++) {
+        esp_gattc_char_elem_t scan_result;
+        uint16_t scan_count = 1;
+        esp_gatt_status_t scan_status = esp_ble_gattc_get_char_by_uuid(
+            this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+            h, h, ENERGOMERA_VERSION_UUID.get_uuid(), &scan_result, &scan_count);
+            
+        if (scan_status == ESP_GATT_OK && scan_count > 0) {
+          ESP_LOGI(TAG, "Found version char by handle scan at 0x%04X", scan_result.char_handle);
+        }
+      }
     }
 
     // try another way
