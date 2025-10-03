@@ -71,10 +71,10 @@ void EnergomeraBleComponent::setup() {
   }
 
   this->sync_address_from_parent_();
-
+ 
   // Configure default security parameters to allow MITM bonding with PIN
-  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND;  // ESP_LE_AUTH_REQ_SC_MITM_BOND;
-  esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;        // ESP_IO_CAP_IO;
+  esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_BOND_MITM;  // Require MITM protection
+  esp_ble_io_cap_t iocap = ESP_IO_CAP_IN;                   // We can INPUT (receive PIN)
   uint8_t key_size = 16;
   uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
   uint8_t resp_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
@@ -638,7 +638,8 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       // this->set_state_(FsmState::RESOLVING);
       this->sync_address_from_parent_();
       // this->initiate_pairing_(param->connect.remote_bda);
-
+      
+      esp_ble_remove_bond_device(param->connect.remote_bda);
       this->set_timeout(500, [this, param]() {
         ESP_LOGI(TAG, "Initiating pairing with PIN");
         esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
@@ -817,20 +818,20 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
       if (!this->parent_->check_addr(param->ble_security.key_notif.bd_addr))
         break;
-      ESP_LOGI(TAG, "Passkey notification: %06u", param->ble_security.key_notif.passkey);
+      ESP_LOGE(TAG, "Passkey notification: %06u", param->ble_security.key_notif.passkey);
       break;
 
     case ESP_GAP_BLE_PASSKEY_REQ_EVT:
       if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr))
         break;
-      ESP_LOGI(TAG, "Supplying PIN %06u", this->passkey_);
+      ESP_LOGE(TAG, "Supplying PIN %06u", this->passkey_);
       esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, this->passkey_);
       break;
 
     case ESP_GAP_BLE_SEC_REQ_EVT:
       if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr))
         break;
-      ESP_LOGD(TAG, "Security request received, confirming");
+      ESP_LOGE(TAG, "Security request received, confirming");
       esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
       break;
 
@@ -840,6 +841,10 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
 
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGI(TAG, "Pairing completed successfully");
+        ESP_LOGI(TAG, "Auth mode: 0x%02X, Key present: 0x%02X, Auth mode: %d", 
+                 param->ble_security.auth_cmpl.auth_mode,
+                 param->ble_security.auth_cmpl.key_present,
+                 param->ble_security.auth_cmpl.auth_mode);
         this->set_timeout(500, [this]() {
           this->link_encrypted_ = true;
           // this->set_state_(FsmState::RESOLVING);
@@ -851,7 +856,7 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
         // else if (this->state_ == FsmState::WAITING_NOTIFICATION_ENABLE)
         //   this->set_timeout("enable_notify", 100, [this]() { this->enable_notifications_(); });
       } else {
-        ESP_LOGE(TAG, "Pairing failed, status=%d", param->ble_security.auth_cmpl.fail_reason);
+        ESP_LOGE(TAG, "Pairing failed, fail reason=%d", param->ble_security.auth_cmpl.fail_reason);
         this->link_encrypted_ = false;
       }
       break;
