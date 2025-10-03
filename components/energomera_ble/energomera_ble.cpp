@@ -387,7 +387,7 @@ bool EnergomeraBleComponent::resolve_tx_descriptors_() {
   }
 
   if (this->tx_cccd_handle_ == 0 && this->tx_char_handle_ != 0) {
-    this->tx_cccd_handle_ = this->tx_char_handle_ + 1;
+    this->tx_cccd_handle_ = 0x0020; //this->tx_char_handle_ + 1;
     ESP_LOGW(TAG, "TX CCCD not enumerated, assuming handle 0x%04X", this->tx_cccd_handle_);
   }
 
