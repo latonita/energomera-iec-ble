@@ -71,7 +71,7 @@ void EnergomeraBleComponent::setup() {
   }
 
   this->sync_address_from_parent_();
- 
+
   // Configure default security parameters to allow MITM bonding with PIN
   esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_BOND_MITM;  // Require MITM protection
   esp_ble_io_cap_t iocap = ESP_IO_CAP_IN;                   // We can INPUT (receive PIN)
@@ -638,9 +638,9 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       // this->set_state_(FsmState::RESOLVING);
       this->sync_address_from_parent_();
       // this->initiate_pairing_(param->connect.remote_bda);
-      
-      esp_ble_remove_bond_device(param->connect.remote_bda);
-      this->set_timeout(500, [this, param]() {
+
+      //esp_ble_remove_bond_device(param->connect.remote_bda);
+      this->set_timeout(200, [this, param]() {
         ESP_LOGI(TAG, "Initiating pairing with PIN");
         esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
       });
@@ -835,16 +835,20 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
       esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
       break;
 
+    case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
+      if (!this->parent_->check_addr(param->ble_security.ble_req.bd_addr))
+        break;
+      ESP_LOGE(TAG, "ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT done");
+      break;
+
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
       if (!this->parent_->check_addr(param->ble_security.auth_cmpl.bd_addr))
         break;
 
       if (param->ble_security.auth_cmpl.success) {
         ESP_LOGI(TAG, "Pairing completed successfully");
-        ESP_LOGI(TAG, "Auth mode: 0x%02X, Key present: 0x%02X, Auth mode: %d", 
-                 param->ble_security.auth_cmpl.auth_mode,
-                 param->ble_security.auth_cmpl.key_present,
-                 param->ble_security.auth_cmpl.auth_mode);
+        ESP_LOGI(TAG, "Auth mode: 0x%02X, Key present: 0x%02X, Auth mode: %d", param->ble_security.auth_cmpl.auth_mode,
+                 param->ble_security.auth_cmpl.key_present, param->ble_security.auth_cmpl.auth_mode);
         this->set_timeout(500, [this]() {
           this->link_encrypted_ = true;
           // this->set_state_(FsmState::RESOLVING);
