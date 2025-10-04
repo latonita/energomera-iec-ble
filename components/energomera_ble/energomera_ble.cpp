@@ -81,7 +81,8 @@ void EnergomeraBleComponent::setup() {
 
   this->sync_address_from_parent_();
 
-  ESP_LOGI(TAG, "Energomera BLE setup complete - security will be configured on connect");
+  auto status = esp_ble_remove_bond_device(this->parent_->get_remote_bda());
+  ESP_LOGI(TAG, "Energomera BLE setup complete. bond remove = %d", status);
 }
 
 void EnergomeraBleComponent::loop() {
@@ -1019,7 +1020,7 @@ void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp
         ESP_LOGI(TAG, "Link encryption status updated - now safe for GATT operations");
 
         // Now that we're authenticated, initiate service discovery manually
-        ESP_LOGI(TAG, "Authentication complete - starting controlled service discovery");
+        ESP_LOGI(TAG, "Authentication complete - starting service discovery");
 
         esp_err_t search_result =
             esp_ble_gattc_search_service(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
