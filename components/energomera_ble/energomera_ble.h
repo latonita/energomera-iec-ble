@@ -36,6 +36,9 @@ class EnergomeraBleComponent : public PollingComponent, public ble_client::BLECl
   void set_delay_between_requests_ms(uint32_t delay) { (void) delay; }
   void set_reboot_after_failure(uint16_t value) { (void) value; }
 
+
+  void remove_bonding();
+
 #ifdef USE_BINARY_SENSOR
   void set_indicator(binary_sensor::BinarySensor *indicator) { (void) indicator; }
 #endif

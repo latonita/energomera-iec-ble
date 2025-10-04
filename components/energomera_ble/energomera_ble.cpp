@@ -81,8 +81,16 @@ void EnergomeraBleComponent::setup() {
 
   this->sync_address_from_parent_();
 
+  ESP_LOGI(TAG, "Energomera BLE setup complete.");
+}
+
+void EnergomeraBleComponent::remove_bonding() {
+  if (this->parent_ == nullptr) {
+    ESP_LOGE(TAG, "BLE client parent not configured");
+    return;
+  }
   auto status = esp_ble_remove_bond_device(this->parent_->get_remote_bda());
-  ESP_LOGI(TAG, "Energomera BLE setup complete. bond remove = %d", status);
+  ESP_LOGI(TAG, "Energomera BLE remove bond device = %d", status);
 }
 
 void EnergomeraBleComponent::loop() {
