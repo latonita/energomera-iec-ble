@@ -143,7 +143,7 @@ void EnergomeraBleComponent::loop() {
 
 void EnergomeraBleComponent::update() {
   if (this->node_state == esp32_ble_tracker::ClientState::ESTABLISHED && !services_logged_) {
-    //log_discovered_services_();
+    // log_discovered_services_();
     services_logged_ = true;
   }
   this->parent_->connect();
@@ -611,6 +611,57 @@ void EnergomeraBleComponent::handle_notification_(const esp_ble_gattc_cb_param_t
 
 void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                                                  esp_ble_gattc_cb_param_t *param) {
+  const char *event_names[] = {
+    "ESP_GATTC_REG_EVT",
+    "ESP_GATTC_UNREG_EVT",
+    "ESP_GATTC_OPEN_EVT",
+    "ESP_GATTC_READ_CHAR_EVT",
+    "ESP_GATTC_WRITE_CHAR_EVT",
+    "ESP_GATTC_CLOSE_EVT",
+    "ESP_GATTC_SEARCH_CMPL_EVT",
+    "ESP_GATTC_SEARCH_RES_EVT",
+    "ESP_GATTC_READ_DESCR_EVT",
+    "ESP_GATTC_WRITE_DESCR_EVT",
+    "ESP_GATTC_NOTIFY_EVT",
+    "ESP_GATTC_PREP_WRITE_EVT",
+    "ESP_GATTC_EXEC_EVT",
+    "ESP_GATTC_ACL_EVT",
+    "ESP_GATTC_CANCEL_OPEN_EVT",
+    "ESP_GATTC_SRVC_CHG_EVT",
+    "ESP_GATTC_ENC_CMPL_CB_EVT",
+    "ESP_GATTC_CFG_MTU_EVT",
+    "ESP_GATTC_ADV_DATA_EVT",
+    "ESP_GATTC_MULT_ADV_ENB_EVT",
+    "ESP_GATTC_MULT_ADV_UPD_EVT",
+    "ESP_GATTC_MULT_ADV_DATA_EVT",
+    "ESP_GATTC_MULT_ADV_DIS_EVT",
+    "ESP_GATTC_CONGEST_EVT",
+    "ESP_GATTC_BTH_SCAN_ENB_EVT",
+    "ESP_GATTC_BTH_SCAN_CFG_EVT",
+    "ESP_GATTC_BTH_SCAN_RD_EVT",
+    "ESP_GATTC_BTH_SCAN_THR_EVT",
+    "ESP_GATTC_BTH_SCAN_PARAM_EVT",
+    "ESP_GATTC_BTH_SCAN_DIS_EVT",
+    "ESP_GATTC_SCAN_FLT_CFG_EVT",
+    "ESP_GATTC_SCAN_FLT_PARAM_EVT",
+    "ESP_GATTC_SCAN_FLT_STATUS_EVT",
+    "ESP_GATTC_ADV_VSC_EVT",
+    "ESP_GATTC_REG_FOR_NOTIFY_EVT",
+    "ESP_GATTC_UNREG_FOR_NOTIFY_EVT",
+    "ESP_GATTC_CONNECT_EVT",
+    "ESP_GATTC_DISCONNECT_EVT",
+    "ESP_GATTC_READ_MULTIPLE_EVT",
+    "ESP_GATTC_QUEUE_FULL_EVT",
+    "ESP_GATTC_SET_ASSOC_EVT",
+    "ESP_GATTC_GET_ADDR_LIST_EVT",
+    "ESP_GATTC_DIS_SRVC_CMPL_EVT",
+    "ESP_GATTC_READ_MULTI_VAR_EVT",
+
+  };
+
+  const char *event_name = (event < sizeof(event_names) / sizeof(event_names[0])) ? event_names[event] : "UNKNOWN";
+  ESP_LOGI(TAG, "GATTC Event %d (%s)", event, event_name);
+
   switch (event) {
     case ESP_GATTC_CONNECT_EVT: {
       if (!this->parent_->check_addr(param->connect.remote_bda))
@@ -733,7 +784,8 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       //     target_uuid.len = ESP_UUID_LEN_128;
       //     memcpy(target_uuid.uuid.uuid128, ENERGOMERA_SERVICE_UUID_128, 16);
       //     esp_err_t search_result =
-      //         esp_ble_gattc_search_service(this->parent_->get_gattc_if(), this->parent_->get_conn_id(), &target_uuid);
+      //         esp_ble_gattc_search_service(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
+      //         &target_uuid);
       //     if (search_result == ESP_OK) {
       //       this->service_search_requested_ = true;
       //       ESP_LOGI(TAG, "Targeted service search initiated - waiting for ESP_GATTC_DIS_SRVC_CMPL_EVT");
@@ -919,37 +971,38 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
 }
 
 void EnergomeraBleComponent::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-  const char *event_names[] = {"ADV_DATA_SET_COMPLETE",
-                               "SCAN_RSP_DATA_SET_COMPLETE",
-                               "SCAN_PARAM_SET_COMPLETE",
-                               "SCAN_RESULT",
-                               "ADV_DATA_RAW_SET_COMPLETE",
-                               "SCAN_RSP_DATA_RAW_SET_COMPLETE",
-                               "ADV_START_COMPLETE",
-                               "SCAN_START_COMPLETE",
-                               "AUTH_CMPL",
-                               "KEY",
-                               "SEC_REQ",
-                               "PASSKEY_NOTIF",
-                               "PASSKEY_REQ",
-                               "OOB_REQ",
-                               "LOCAL_IR",
-                               "LOCAL_ER",
-                               "NC_REQ",
-                               "ADV_STOP_COMPLETE",
-                               "SCAN_STOP_COMPLETE",
-                               "SET_STATIC_RAND_ADDR",
-                               "UPDATE_CONN_PARAMS",
-                               "SET_PKT_LENGTH_COMPLETE",
-                               "SET_LOCAL_PRIVACY_COMPLETE",
-                               "REMOVE_BOND_DEV_COMPLETE",
-                               "CLEAR_BOND_DEV_COMPLETE",
-                               "GET_BOND_DEV_COMPLETE",
-                               "READ_RSSI_COMPLETE",
-                               "UPDATE_WHITELIST_COMPLETE"};
+  // const char *event_names[] = {"ADV_DATA_SET_COMPLETE",
+  //                              "SCAN_RSP_DATA_SET_COMPLETE",
+  //                              "SCAN_PARAM_SET_COMPLETE",
+  //                              "SCAN_RESULT",
+  //                              "ADV_DATA_RAW_SET_COMPLETE",
+  //                              "SCAN_RSP_DATA_RAW_SET_COMPLETE",
+  //                              "ADV_START_COMPLETE",
+  //                              "SCAN_START_COMPLETE",
+  //                              "AUTH_CMPL",
+  //                              "KEY",
+  //                              "SEC_REQ",
+  //                              "PASSKEY_NOTIF",
+  //                              "PASSKEY_REQ",
+  //                              "OOB_REQ",
+  //                              "LOCAL_IR",
+  //                              "LOCAL_ER",
+  //                              "NC_REQ",
+  //                              "ADV_STOP_COMPLETE",
+  //                              "SCAN_STOP_COMPLETE",
+  //                              "SET_STATIC_RAND_ADDR",
+  //                              "UPDATE_CONN_PARAMS",
+  //                              "SET_PKT_LENGTH_COMPLETE",
+  //                              "SET_LOCAL_PRIVACY_COMPLETE",
+  //                              "REMOVE_BOND_DEV_COMPLETE",
+  //                              "CLEAR_BOND_DEV_COMPLETE",
+  //                              "GET_BOND_DEV_COMPLETE",
+  //                              "READ_RSSI_COMPLETE",
+  //                              "UPDATE_WHITELIST_COMPLETE"};
 
-  const char *event_name = (event < sizeof(event_names) / sizeof(event_names[0])) ? event_names[event] : "UNKNOWN";
-  ESP_LOGI(TAG, "GAP Event %d (%s)", event, event_name);
+  // const char *event_name = (event < sizeof(event_names) / sizeof(event_names[0])) ? event_names[event] : "UNKNOWN";
+  //ESP_LOGI(TAG, "GAP Event %d (%s)", event, event_name);
+  ESP_LOGI(TAG, "GAP Event %d", event);
 
   switch (event) {
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
