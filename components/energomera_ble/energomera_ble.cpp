@@ -649,9 +649,9 @@ void EnergomeraBleComponent::gattc_event_handler(esp_gattc_cb_event_t event, esp
       // esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(uint8_t));
 
       // Immediately initiate encryption like CE208 implementation
-      ESP_LOGI(TAG, "Initiating MITM encryption immediately");
-      esp_err_t result = esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
-      ESP_LOGI(TAG, "esp_ble_set_encryption result: %d", result);
+      // ESP_LOGI(TAG, "Initiating MITM encryption immediately");
+      // esp_err_t result = esp_ble_set_encryption(param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_MITM);
+      // ESP_LOGI(TAG, "esp_ble_set_encryption result: %d", result);
 
       break;
     }
